@@ -49,6 +49,17 @@ Then open `http://127.0.0.1:8000/` in your browser to access the interface.
 6. You can start signal chaser from this panel to automatically cycle through each signal to its maximum/minimum value at specified intervals.
 7. Start and stop recording from the top of the monitor panel to save CAN traffic to file, then use the **Open Recordings** link to perform graphical analysis on the playback page.
 
+### Usage Guide (Screenshots)
+
+1. **Connect CAN and Load DBC** – Choose your CAN interface or enter it manually, then upload the relevant `.dbc` file from the browser.  
+   ![Upload DBC and configure CAN](images/1-uploadDbcAndConCan.png)
+2. **Prepare a Message** – Pick a message, set signal values, and define the transmit period if you need periodic sending.  
+   ![Create message and set signals](images/2-CreateMessage.png)
+3. **Monitor Live Traffic** – Observe transmitted and received frames, run the signal chaser, and control recordings from the monitor panel.  
+   ![Monitor CAN bus activity](images/3-Monitor.png)
+4. **Analyze Recordings** – Open saved recordings on the playback page to inspect signal charts and event logs.  
+   ![Graphical analysis of recordings](images/4-Graph.png)
+
 ### Multi-Language Support
 
 The application supports both Turkish and English languages. Users can switch between languages using the language selector (TR/EN buttons) in the page header. The selected language preference is saved and persists across sessions.
@@ -117,6 +128,17 @@ Ardından tarayıcınızdan `http://127.0.0.1:8000/` adresini açarak arayüze e
 5. **CAN İzleme** panelinde hem gönderilen hem de alınan çerçeveler canlı olarak görüntülenir. DBC'de tanımlı mesajlar otomatik olarak çözümlenir.
 6. İsterseniz bu panelden sinyal taramasını başlatıp belirlediğiniz aralıkta her sinyali sırasıyla maksimum/minimum değerine otomatik taşıyabilirsiniz.
 7. İzleme panelinin üstünden kayıt başlatıp durdurarak CAN trafiğini dosyaya kaydedebilir, ardından **Kayıtları Aç** bağlantısıyla playback sayfasında grafik analizini yapabilirsiniz.
+
+### Kullanım Kılavuzu (Ekran Görüntüleri)
+
+1. **CAN bağlantısını yapıp DBC yükleyin** – CAN arayüzünüzü seçin veya manuel girin, ardından tarayıcıdan ilgili `.dbc` dosyasını yükleyin.  
+   ![CAN bağlantısı ve DBC yükleme](images/1-uploadDbcAndConCan.png)
+2. **Mesajı hazırlayın** – Göndermek istediğiniz mesajı seçip sinyal değerlerini ayarlayın, gerektiğinde periyot girerek periyodik gönderimi başlatın.  
+   ![Mesaj oluşturma ve sinyal ayarları](images/2-CreateMessage.png)
+3. **Canlı trafiği izleyin** – Gönderilen ve alınan çerçeveleri takip edin, sinyal tarayıcısını çalıştırın ve kayıtları bu panelden yönetin.  
+   ![CAN trafiğini izleme ekranı](images/3-Monitor.png)
+4. **Kayıtları analiz edin** – Kaydedilen trafiği playback sayfasında açıp sinyal grafikleri ve olay loglarını inceleyin.  
+   ![Kayıtların grafiksel analizi](images/4-Graph.png)
 
 ### Çoklu Dil Desteği
 
