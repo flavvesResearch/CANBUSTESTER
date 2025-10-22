@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="tr" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <title>CAN Kayıt Oynatma</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" defer></script>
+    <script src="/static/theme.js" type="module"></script>
+    <script src="/static/playback.js" type="module" defer></script>
+</head>
+<body>
+<header>
+    <div class="header-top">
+        <h1>CAN Kayıt Oynatma</h1>
+        <button id="theme-toggle" class="theme-toggle" type="button" data-theme-toggle>
+            🌙 Koyu Mod
+        </button>
+    </div>
+    <p>Kaydedilmiş CAN trafiğini DBC ile analiz edip sinyalleri görselleştirin.</p>
+    <p><a class="link-button" href="/" style="margin-top:1rem;">CAN Test Paneline Dön</a></p>
+</header>
+
+<main>
+    <section class="panel">
+        <h2>Kayıt Seç</h2>
+        <div class="field">
+            <label for="log-select">Kayıt</label>
+            <select id="log-select">
+                <option value="">Kayıtlar yükleniyor...</option>
+            </select>
+        </div>
+        <div id="log-summary" class="status-card"></div>
+    </section>
+
+    <section class="panel">
+        <h2>DBC Yükle</h2>
+        <form id="playback-dbc-form" class="stack" enctype="multipart/form-data">
+            <label class="file-picker">
+                <input id="playback-dbc-file" name="file" type="file" accept=".dbc" required>
+                <span id="playback-dbc-label">Dosya seçin</span>
+            </label>
+            <button id="decode-button" type="submit" class="primary" disabled>Analiz Et</button>
+        </form>
+        <div id="decode-status" class="help-text"></div>
+    </section>
+
+    <section class="panel full-width">
+        <h2>Signal Grafikleri</h2>
+        <div class="playback-grid">
+            <aside id="signal-list" class="signal-list">
+                <p class="help-text">Analiz için DBC yükleyip kayıt seçin.</p>
+            </aside>
+            <div class="chart-wrapper">
+                <canvas id="signal-chart"></canvas>
+                <div id="signal-details" class="status-card"></div>
+            </div>
+        </div>
+    </section>
+
+    <section class="panel full-width">
+        <h2>Olay Kronolojisi</h2>
+        <div id="event-table" class="event-table"></div>
+    </section>
+</main>
+
+<footer>
+    <p>Kayıt oynatma ve analiz modülü.</p>
+</footer>
+</body>
+</html>

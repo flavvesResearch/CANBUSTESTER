@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="tr" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <title>CAN Bus Tester</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="/static/theme.js" type="module"></script>
+    <script src="/static/i18n.js" type="module"></script>
+</head>
+<body>
+<header>
+    <div class="header-top">
+        <h1 data-i18n="app_title">CAN Bus Tester</h1>
+        <div style="display: flex; gap: 1rem; align-items: center;">
+            <div class="language-selector">
+                <button id="lang-tr" class="active" data-lang="tr">TR</button>
+                <button id="lang-en" data-lang="en">EN</button>
+            </div>
+            <button id="theme-toggle" class="theme-toggle" type="button" data-theme-toggle>
+                🌙 <span data-i18n="dark_mode">Koyu Mod</span>
+            </button>
+        </div>
+    </div>
+    <p data-i18n="app_description">DBC tabanlı CAN mesajlarını web üzerinden oluştur, gönder ve izle.</p>
+</header>
+
+<main>
+    <section class="panel">
+        <h2 data-i18n="can_interface">1. CAN Arayüzü</h2>
+        <form id="interface-form" class="stack">
+            <div class="field">
+                <label for="interface" data-i18n="interface">Arayüz</label>
+                <select id="interface" name="interface" required>
+                    <option value="" data-i18n="loading_interfaces">Arayüzleri getiriliyor…</option>
+                </select>
+            </div>
+            <div class="field">
+                <label for="channel" data-i18n="channel">Kanal</label>
+                <select id="channel" name="channel" required disabled>
+                    <option value="" data-i18n="select_interface_first">Önce arayüz seçin</option>
+                </select>
+            </div>
+            <div id="manual-interface-fields" class="field hidden">
+                <label for="interface-manual" data-i18n="manual_interface">Arayüz (manuel)</label>
+                <input id="interface-manual" placeholder="ör. socketcan">
+            </div>
+            <div id="manual-channel-fields" class="field hidden">
+                <label for="channel-manual" data-i18n="manual_channel">Kanal (manuel)</label>
+                <input id="channel-manual" placeholder="ör. can0">
+            </div>
+            <div class="field">
+                <label for="bitrate" data-i18n="bitrate">Bit Hızı (bps)</label>
+                <input id="bitrate" name="bitrate" type="number" value="500000">
+            </div>
+            <button type="submit" class="primary" data-i18n="start_connection">Bağlantıyı Başlat</button>
+        </form>
+        <div id="interface-status" class="status-card"></div>
+    </section>
+
+    <section class="panel">
+        <h2 data-i18n="load_dbc">2. DBC Yükle</h2>
+        <form id="dbc-form" class="stack" enctype="multipart/form-data">
+            <label class="file-picker">
+                <input id="dbc-file" name="file" type="file" accept=".dbc" required>
+                <span id="dbc-file-label" data-i18n="select_file">Dosya seçin</span>
+            </label>
+            <button type="submit" data-i18n="upload">Yükle</button>
+        </form>
+        <div id="dbc-status" class="status-card"></div>
+    </section>
+
+    <section class="panel message-panel full-width">
+        <h2 data-i18n="create_message">3. Mesaj Oluştur</h2>
+        <form id="message-form" class="message-grid">
+            <div class="message-config">
+                <div id="message-selector" class="field">
+                    <label for="message-list" data-i18n="message">Mesaj</label>
+                    <select id="message-list" disabled>
+                        <option data-i18n="load_dbc_first">Önce DBC yükleyin</option>
+                    </select>
+                </div>
+                <div id="message-comment" class="help-text"></div>
+                <div class="field inline">
+                    <label for="period" data-i18n="period_ms">Periyot (ms)</label>
+                    <input id="period" name="period" type="number" min="0" data-i18n-placeholder="period_placeholder">
+                </div>
+                <div class="bulk-actions">
+                    <div class="field">
+                        <label for="bulk-value" data-i18n="bulk_signal_value">Toplu Sinyal Değeri</label>
+                        <input id="bulk-value" name="bulk-value" type="number" step="any" data-i18n-placeholder="bulk_value_placeholder">
+                    </div>
+                    <div class="bulk-buttons">
+                        <button id="apply-bulk" type="button" class="secondary" data-i18n="apply_all">Tümünü Uygula</button>
+                        <button id="fill-ones" type="button" class="secondary" data-i18n="all_ones">Hepsi 1</button>
+                        <button id="fill-zeros" type="button" class="secondary" data-i18n="all_zeros">Hepsi 0</button>
+                    </div>
+                </div>
+                <div class="signal-chaser">
+                    <div class="field inline">
+                        <label for="signal-chaser-interval" data-i18n="signal_chaser_interval">Tarama Süresi (sn)</label>
+                        <input id="signal-chaser-interval" type="number" min="0.1" step="0.1" value="3">
+                    </div>
+                    <div class="chaser-buttons">
+                        <button id="chaser-start" type="button" class="secondary" data-i18n="start_signal_chaser">Sinyal Taramasını Başlat</button>
+                        <button id="chaser-stop" type="button" class="secondary" disabled data-i18n="stop_chaser">Tarama Durdur</button>
+                    </div>
+                    <div id="chaser-status" class="help-text" data-i18n="chaser_ready">Tarama hazır.</div>
+                </div>
+                <div class="actions">
+                    <button type="submit" class="primary" data-i18n="send">Gönder</button>
+                    <button id="stop-periodic" type="button" class="secondary" disabled data-i18n="stop">Durdur</button>
+                </div>
+                <div id="message-feedback" class="help-text"></div>
+            </div>
+            <div class="message-signals">
+                <div id="signals-container"></div>
+            </div>
+        </form>
+    </section>
+
+    <section class="panel full-width">
+        <h2 data-i18n="can_monitor">CAN İzleme</h2>
+        <div class="record-controls">
+            <div class="record-controls__row">
+                <div class="field">
+                    <label for="record-name" data-i18n="recording_name">Kayıt Adı</label>
+                    <input id="record-name" data-i18n-placeholder="auto_name">
+                </div>
+                <div class="record-buttons">
+                    <button id="record-start" type="button" class="primary" data-i18n="start_recording">Kaydı Başlat</button>
+                    <button id="record-stop" type="button" class="secondary" disabled data-i18n="stop_recording">Kaydı Durdur</button>
+                    <a class="link-button" href="/playback" target="_blank" rel="noopener" data-i18n="open_recordings">Kayıtları Aç</a>
+                </div>
+            </div>
+            <div id="record-status" class="help-text" data-i18n="recording_waiting">Kayıt beklemede.</div>
+            <div id="recordings-list" class="recordings-list"></div>
+        </div>
+        <div id="monitor-log"></div>
+    </section>
+</main>
+
+<footer>
+    <p data-i18n="footer_text">Web arayüzü FastAPI + WebSocket altyapısı ile çalışmaktadır.</p>
+</footer>
+
+<script src="/static/app.js" type="module"></script>
+</body>
+</html>
