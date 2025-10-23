@@ -107,6 +107,7 @@ class SignalChaserManager:
         mode: str = "signals",
         codes: Optional[List[int]] = None,
         source: Optional[str] = None,
+        descriptions: Optional[Dict[int, str]] = None,
     ) -> Dict[str, Any]:
         if interval_seconds <= 0:
             raise ValueError("Süre 0'dan büyük olmalı.")
@@ -120,7 +121,13 @@ class SignalChaserManager:
         if mode == "codes":
             if not codes:
                 raise ValueError("Gönderilecek hata kodu bulunamadı.")
-            return self._start_code_scan(message_name, interval_seconds, codes, source=source)
+            return self._start_code_scan(
+                message_name,
+                interval_seconds,
+                codes,
+                source=source,
+                descriptions=descriptions,
+            )
         raise ValueError("Geçersiz tarama modu.")
 
     def _start_signal_scan(self, message_name: str, interval_seconds: float) -> Dict[str, Any]:
@@ -173,6 +180,7 @@ class SignalChaserManager:
         codes: List[int],
         *,
         source: Optional[str] = None,
+        descriptions: Optional[Dict[int, str]] = None,
     ) -> Dict[str, Any]:
         try:
             message = self._dbc_manager.get_message_by_name(message_name)
@@ -195,6 +203,12 @@ class SignalChaserManager:
         byte_length = int(message.length or 8)
         if byte_length <= 0:
             byte_length = 8
+        code_lookup: Dict[int, str] = {}
+        if descriptions:
+            for code, text in descriptions.items():
+                if isinstance(code, int) and isinstance(text, str):
+                    code_lookup[code] = text.strip()
+
         info: Dict[str, Any] = {
             "messageName": message_name,
             "intervalSeconds": interval_seconds,
@@ -207,11 +221,24 @@ class SignalChaserManager:
             "currentSignal": None,
             "currentCode": None,
             "currentIndex": None,
+            "currentDescription": None,
         }
+        if code_lookup:
+            info["codeDescriptions"] = {
+                self._format_code(code, byte_length * 2): text for code, text in code_lookup.items()
+            }
+            info["codeDescriptionsCount"] = len(code_lookup)
 
         thread = threading.Thread(
             target=self._run_code_scan,
-            args=(message_name, message, tuple(filtered_codes), interval_seconds, stop_event),
+            args=(
+                message_name,
+                message,
+                tuple(filtered_codes),
+                interval_seconds,
+                stop_event,
+                code_lookup,
+            ),
             name=f"code-chaser-{message_name}",
             daemon=True,
         )
@@ -221,6 +248,7 @@ class SignalChaserManager:
                 "thread": thread,
                 "stop": stop_event,
                 "info": info,
+                "descriptions": code_lookup,
             }
 
         thread.start()
@@ -291,6 +319,7 @@ class SignalChaserManager:
         codes: tuple[int, ...],
         interval_seconds: float,
         stop_event: threading.Event,
+        descriptions: Dict[int, str],
     ) -> None:
         index = 0
         code_count = len(codes)
@@ -300,12 +329,15 @@ class SignalChaserManager:
 
         while not stop_event.is_set():
             code = codes[index]
+            description = descriptions.get(code) if descriptions else None
 
             try:
                 encoded = self._encode_code_payload(message, code, byte_length)
                 encoded["code"] = code
+                if description:
+                    encoded["description"] = description
                 self._send(message_name, encoded, mode="codes")
-                self._update_current_code(message_name, code, index, byte_length * 2)
+                self._update_current_code(message_name, code, index, byte_length * 2, description)
             except Exception as exc:  # pragma: no cover - runtime safety
                 logger.exception("Hata kodu taraması gönderim hatası: %s", exc)
 
@@ -313,7 +345,7 @@ class SignalChaserManager:
                 break
             index = (index + 1) % code_count
 
-        self._update_current_code(message_name, None, None, byte_length * 2)
+        self._update_current_code(message_name, None, None, byte_length * 2, None)
 
     def _encode_code_payload(self, message: Any, code: int, byte_length: int) -> Dict[str, Any]:
         if code < 0:
@@ -337,6 +369,8 @@ class SignalChaserManager:
         if self._notifier:
             payload = dict(encoded)
             payload.setdefault("mode", mode)
+            if "description" in encoded:
+                payload["description"] = encoded["description"]
             self._notifier(message_name, payload)
 
     def _update_current_signal(self, message_name: str, signal_name: Optional[str]) -> None:
@@ -356,6 +390,7 @@ class SignalChaserManager:
         code_value: Optional[int],
         index: Optional[int],
         hex_width: int,
+        description: Optional[str],
     ) -> None:
         with self._lock:
             task = self._tasks.get(message_name)
@@ -368,6 +403,7 @@ class SignalChaserManager:
             else:
                 info["currentCode"] = self._format_code(code_value, hex_width)
                 info["lastSentAt"] = time.time()
+            info["currentDescription"] = description
             if code_value is None:
                 info["lastSentAt"] = time.time()
 
@@ -514,6 +550,7 @@ class SignalChaserStartRequest(BaseModel):
     codes: Optional[List[Any]] = Field(default=None)
     code_range_start: Optional[str] = Field(default=None, alias="codeRangeStart")
     code_range_end: Optional[str] = Field(default=None, alias="codeRangeEnd")
+    code_descriptions: Optional[Dict[str, Any]] = Field(default=None, alias="codeDescriptions")
 
 
 class SignalChaserStopRequest(BaseModel):
@@ -592,6 +629,9 @@ def _handle_tx_event(
     code_value = encoded.get("code")
     if code_value is not None:
         payload["code"] = code_value
+    description = encoded.get("description")
+    if description:
+        payload["description"] = description
     broadcaster.send_threadsafe(payload)
     recording_manager.append_event(payload)
 
@@ -745,15 +785,27 @@ async def upload_chaser_codes(file: UploadFile = File(...)) -> Dict[str, Any]:
 
     target_column: Optional[int] = None
     header_row_index: Optional[int] = None
+    description_column: Optional[int] = None
+    description_headers = {
+        "hata başlıkları",
+        "hatabaşlıkları",
+        "hata açıklaması",
+        "hata aciklamasi",
+        "description",
+        "error description",
+        "error titles",
+    }
+    normalised_description_headers = {_normalise_header(alias) for alias in description_headers}
 
     for row_index, row in enumerate(sheet.iter_rows(min_row=1, max_row=sheet.max_row, values_only=True), start=1):
         for column_index, cell in enumerate(row, start=1):
             if isinstance(cell, str):
                 candidate = _normalise_header(cell)
-                if candidate in normalised_aliases:
+                if target_column is None and candidate in normalised_aliases:
                     target_column = column_index
                     header_row_index = row_index
-                    break
+                if description_column is None and candidate in normalised_description_headers:
+                    description_column = column_index
         if target_column is not None:
             break
 
@@ -771,6 +823,7 @@ async def upload_chaser_codes(file: UploadFile = File(...)) -> Dict[str, Any]:
             raise HTTPException(status_code=400, detail="Excel dosyasında 'HATA KODLARI (hex)' başlığı bulunamadı.")
 
     codes: List[int] = []
+    code_descriptions: Dict[int, str] = {}
     invalid_count = 0
 
     for row_index in range(header_row_index + 1, sheet.max_row + 1):
@@ -785,6 +838,10 @@ async def upload_chaser_codes(file: UploadFile = File(...)) -> Dict[str, Any]:
             invalid_count += 1
             continue
         codes.append(code_value)
+        if description_column is not None and row_index <= sheet.max_row:
+            description_raw = sheet.cell(row=row_index, column=description_column).value
+            if isinstance(description_raw, str) and description_raw.strip():
+                code_descriptions[code_value] = description_raw.strip()
 
     if not codes:
         raise HTTPException(status_code=400, detail="Excel dosyasında geçerli hata kodu bulunamadı.")
@@ -810,6 +867,7 @@ async def upload_chaser_codes(file: UploadFile = File(...)) -> Dict[str, Any]:
         "maxAllowed": SignalChaserManager.MAX_CODES,
         "hexDigits": hex_digits,
         "codes": codes_payload,
+        "descriptions": {f"0x{code:0{hex_digits}X}": text for code, text in code_descriptions.items()},
     }
 
 
@@ -820,6 +878,7 @@ async def start_signal_chaser(request: SignalChaserStartRequest) -> Dict[str, An
     try:
         if request.mode == "codes":
             codes: List[int] = []
+            description_map: Dict[int, str] = {}
 
             if request.codes:
                 for raw in request.codes:
@@ -848,12 +907,24 @@ async def start_signal_chaser(request: SignalChaserStartRequest) -> Dict[str, An
             if not codes:
                 raise HTTPException(status_code=400, detail="Gönderilecek hata kodu bulunamadı.")
 
+            if request.code_descriptions:
+                for key, value in request.code_descriptions.items():
+                    if value in (None, ""):
+                        continue
+                    try:
+                        code_key = _parse_code_value(key)
+                    except ValueError:
+                        continue
+                    if code_key in codes:
+                        description_map[code_key] = str(value).strip()
+
             task = signal_chaser.start(
                 request.message_name,
                 request.interval_seconds,
                 mode="codes",
                 codes=codes,
                 source=request.code_source,
+                descriptions=description_map or None,
             )
         else:
             task = signal_chaser.start(request.message_name, request.interval_seconds)

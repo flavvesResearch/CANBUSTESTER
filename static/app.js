@@ -198,6 +198,14 @@ function renderCodeUploadState() {
                     : `First ${upload.maxAllowed} codes will be used.`
             );
         }
+        const descriptionCount = upload.descriptions ? Object.keys(upload.descriptions).length : 0;
+        if (descriptionCount) {
+            messages.push(
+                lang === 'tr'
+                    ? `${descriptionCount} açıklama eşleştirildi.`
+                    : `${descriptionCount} descriptions linked.`
+            );
+        }
         codeExcelStatus.textContent = messages.join(" ");
     } else {
         codeExcelLabel.textContent = t('code_excel_select');
@@ -262,6 +270,7 @@ async function uploadCodeExcel(file) {
             invalidCount: response.invalidCount || 0,
             truncated: Boolean(response.truncated),
             maxAllowed: response.maxAllowed || null,
+            descriptions: response.descriptions && typeof response.descriptions === "object" ? response.descriptions : {},
         };
         renderCodeUploadState();
     } catch (error) {
@@ -485,6 +494,9 @@ function setChaserState(chaserInfo) {
             }
             if (typeof chaserInfo.codeCount === "number") {
                 details.push(`${t('code_total')} ${chaserInfo.codeCount}`);
+            }
+            if (chaserInfo.currentDescription) {
+                details.push(`${t('code_description_label')}: ${chaserInfo.currentDescription}`);
             }
             const suffix = details.length ? ` ${details.join(' • ')}` : "";
             chaserStatus.textContent = `${t('code_chaser_running')} (${t('every')} ${intervalText} ${unit}).${suffix}`;
@@ -724,6 +736,21 @@ function renderMonitor() {
         const hexData = entry.data.map((byte) => byte.toString(16).padStart(2, "0").toUpperCase()).join(" ");
         dataLine.textContent = `DATA: ${hexData}`;
         container.append(dataLine);
+
+        if (entry.code !== null && entry.code !== undefined) {
+            const codeValue = typeof entry.code === "number"
+                ? `0x${entry.code.toString(16).toUpperCase()}`
+                : String(entry.code);
+            const codeLine = document.createElement("span");
+            codeLine.textContent = `${t('code_label')}: ${codeValue}`;
+            container.append(codeLine);
+        }
+
+        if (entry.description) {
+            const descriptionLine = document.createElement("span");
+            descriptionLine.textContent = `${t('code_description_label')}: ${entry.description}`;
+            container.append(descriptionLine);
+        }
 
         if (entry.decoded) {
             const decodedLine = document.createElement("span");
@@ -1026,6 +1053,9 @@ if (chaserStartButton) {
                     return;
                 }
                 payload.codes = state.codeUpload.codes;
+                if (state.codeUpload.descriptions && Object.keys(state.codeUpload.descriptions).length) {
+                    payload.codeDescriptions = state.codeUpload.descriptions;
+                }
             } else {
                 const startValue = codeRangeStartInput?.value?.trim();
                 const endValue = codeRangeEndInput?.value?.trim();
@@ -1107,6 +1137,8 @@ function handleSocketEvent(event) {
                 dlc: event.dlc,
                 data: event.data || [],
                 decoded: { name: event.message, signals: {} },
+                code: event.code ?? null,
+                description: event.description || null,
             });
             if (state.signalChaser && state.signalChaser.messageName === event.message) {
                 refreshChaserStatus();
