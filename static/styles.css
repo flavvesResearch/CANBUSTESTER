@@ -368,6 +368,44 @@ button:not(:disabled):focus {
     padding: 0.75rem 0.85rem;
 }
 
+.chaser-mode,
+.code-source {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.chaser-mode label,
+.code-source label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.9rem;
+    cursor: pointer;
+    user-select: none;
+}
+
+.code-options {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+    padding: 0.75rem;
+    border-radius: 10px;
+    border: 1px dashed rgba(148, 163, 184, 0.4);
+    background: rgba(15, 23, 23, 0.04);
+}
+
+.code-source-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.code-source-panel .field {
+    margin: 0;
+}
+
 .chaser-buttons {
     display: flex;
     gap: 0.6rem;
@@ -382,6 +420,11 @@ button:not(:disabled):focus {
 :root[data-theme="light"] .signal-chaser {
     background: rgba(248, 250, 252, 0.95);
     border: 1px solid rgba(203, 213, 225, 0.6);
+}
+
+:root[data-theme="light"] .code-options {
+    background: rgba(248, 250, 252, 0.58);
+    border-color: rgba(148, 163, 184, 0.4);
 }
 
 :root[data-theme="light"] .chaser-buttons button.secondary {

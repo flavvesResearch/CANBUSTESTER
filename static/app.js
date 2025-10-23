@@ -12,6 +12,9 @@ const state = {
     recordingActive: null,
     recordings: [],
     signalChaser: null,
+    chaserMode: "signals",
+    codeSource: "excel",
+    codeUpload: null,
 };
 
 const interfaceForm = document.getElementById("interface-form");
@@ -47,6 +50,16 @@ const chaserIntervalInput = document.getElementById("signal-chaser-interval");
 const chaserStartButton = document.getElementById("chaser-start");
 const chaserStopButton = document.getElementById("chaser-stop");
 const chaserStatus = document.getElementById("chaser-status");
+const chaserModeRadios = Array.from(document.querySelectorAll('input[name="chaser-mode"]'));
+const codeOptionsContainer = document.getElementById("chaser-code-options");
+const codeSourceRadios = Array.from(document.querySelectorAll('input[name="code-source"]'));
+const codeExcelInput = document.getElementById("code-excel-file");
+const codeExcelLabel = document.getElementById("code-excel-label");
+const codeExcelStatus = document.getElementById("code-excel-status");
+const codeExcelPanel = document.getElementById("code-source-excel");
+const codeManualPanel = document.getElementById("code-source-manual");
+const codeRangeStartInput = document.getElementById("code-range-start");
+const codeRangeEndInput = document.getElementById("code-range-end");
 
 // Language buttons
 const langTrButton = document.getElementById("lang-tr");
@@ -79,9 +92,8 @@ function updateTranslations() {
     
     renderInterfaceStatus(state.interfaces.length ? { configured: true } : { configured: false });
     
-    if (state.selectedMessage) {
-        setChaserState(state.signalChaser);
-    }
+    renderCodeUploadState();
+    setChaserState(state.signalChaser);
     
     setRecordingState(state.recordingActive);
     renderRecordingsList();
@@ -157,6 +169,112 @@ function renderInterfaceStatus(status) {
         ${extra ? ` | ${extra}` : ""}
     `;
 }
+
+function renderCodeUploadState() {
+    if (!codeExcelLabel || !codeExcelStatus) {
+        return;
+    }
+    const upload = state.codeUpload;
+    if (upload && Array.isArray(upload.codes) && upload.codes.length) {
+        codeExcelLabel.textContent = `${upload.fileName || t('code_excel_select')} (${upload.count})`;
+        const lang = getCurrentLanguage();
+        const messages = [];
+        messages.push(
+            lang === 'tr'
+                ? `${upload.count} hata kodu hazır.`
+                : `${upload.count} error codes ready.`
+        );
+        if (upload.invalidCount) {
+            messages.push(
+                lang === 'tr'
+                    ? `${upload.invalidCount} satır atlandı.`
+                    : `${upload.invalidCount} rows skipped.`
+            );
+        }
+        if (upload.truncated && upload.maxAllowed) {
+            messages.push(
+                lang === 'tr'
+                    ? `İlk ${upload.maxAllowed} kod kullanıldı.`
+                    : `First ${upload.maxAllowed} codes will be used.`
+            );
+        }
+        codeExcelStatus.textContent = messages.join(" ");
+    } else {
+        codeExcelLabel.textContent = t('code_excel_select');
+        codeExcelStatus.textContent = t('code_excel_help');
+    }
+}
+
+function setCodeSourceValue(source, options = {}) {
+    const resolved = source === "manual" ? "manual" : "excel";
+    state.codeSource = resolved;
+    if (!options.skipRadios && codeSourceRadios.length) {
+        codeSourceRadios.forEach((radio) => {
+            radio.checked = radio.value === resolved;
+        });
+    }
+    if (codeExcelPanel) {
+        codeExcelPanel.classList.toggle("hidden", resolved !== "excel");
+    }
+    if (codeManualPanel) {
+        codeManualPanel.classList.toggle("hidden", resolved !== "manual");
+    }
+    if (resolved === "excel") {
+        renderCodeUploadState();
+    }
+}
+
+function setChaserModeValue(mode, options = {}) {
+    const resolved = mode === "codes" ? "codes" : "signals";
+    state.chaserMode = resolved;
+    if (!options.skipRadios && chaserModeRadios.length) {
+        chaserModeRadios.forEach((radio) => {
+            radio.checked = radio.value === resolved;
+        });
+    }
+    if (codeOptionsContainer) {
+        codeOptionsContainer.classList.toggle("hidden", resolved !== "codes");
+    }
+    if (resolved === "codes") {
+        setCodeSourceValue(state.codeSource || "excel", options);
+    }
+}
+
+async function uploadCodeExcel(file) {
+    if (!codeExcelStatus || !codeExcelLabel) {
+        return;
+    }
+    if (!file) {
+        state.codeUpload = null;
+        renderCodeUploadState();
+        return;
+    }
+    const formData = new FormData();
+    formData.append("file", file);
+    codeExcelStatus.textContent = t('code_excel_uploading');
+    try {
+        const response = await api.post("/api/messages/chaser/codes/upload", formData);
+        state.codeUpload = {
+            fileName: response.fileName || file.name,
+            codes: Array.isArray(response.codes) ? response.codes : [],
+            count: response.count ?? (Array.isArray(response.codes) ? response.codes.length : 0),
+            originalCount: response.originalCount ?? response.count ?? (Array.isArray(response.codes) ? response.codes.length : 0),
+            invalidCount: response.invalidCount || 0,
+            truncated: Boolean(response.truncated),
+            maxAllowed: response.maxAllowed || null,
+        };
+        renderCodeUploadState();
+    } catch (error) {
+        state.codeUpload = null;
+        renderCodeUploadState();
+        codeExcelStatus.textContent = `${t('error')} ${error.message || error}`;
+        console.error("Excel yükleme hatası", error);
+    }
+}
+
+setChaserModeValue(state.chaserMode || "signals", { skipRadios: true });
+setCodeSourceValue(state.codeSource || "excel", { skipRadios: true });
+renderCodeUploadState();
 
 function setManualMode(enabled) {
     state.manualMode = enabled;
@@ -310,11 +428,43 @@ function setChaserState(chaserInfo) {
     const isActiveForMessage = Boolean(
         chaserInfo && state.selectedMessage && chaserInfo.messageName === state.selectedMessage.name,
     );
+    const activeMode = chaserInfo?.mode || state.chaserMode || "signals";
+
+    if (isActiveForMessage) {
+        setChaserModeValue(activeMode);
+        if (activeMode === "codes") {
+            setCodeSourceValue(chaserInfo.codeSource || state.codeSource || "excel");
+        }
+    } else {
+        setChaserModeValue(state.chaserMode || "signals");
+        setCodeSourceValue(state.codeSource || "excel");
+    }
 
     chaserStartButton.disabled = !hasMessage || isActiveForMessage;
     chaserStopButton.disabled = !isActiveForMessage;
     if (chaserIntervalInput) {
         chaserIntervalInput.disabled = !hasMessage || isActiveForMessage;
+    }
+
+    if (chaserModeRadios.length) {
+        chaserModeRadios.forEach((radio) => {
+            radio.disabled = isActiveForMessage;
+        });
+    }
+    const disableCodeInputs = isActiveForMessage && (chaserInfo?.mode === "codes");
+    if (codeSourceRadios.length) {
+        codeSourceRadios.forEach((radio) => {
+            radio.disabled = disableCodeInputs;
+        });
+    }
+    if (codeExcelInput) {
+        codeExcelInput.disabled = disableCodeInputs;
+    }
+    if (codeRangeStartInput) {
+        codeRangeStartInput.disabled = disableCodeInputs;
+    }
+    if (codeRangeEndInput) {
+        codeRangeEndInput.disabled = disableCodeInputs;
     }
 
     if (!hasMessage) {
@@ -327,10 +477,24 @@ function setChaserState(chaserInfo) {
         const intervalText = interval > 0 && !Number.isNaN(interval)
             ? (Number.isInteger(interval) ? interval.toString() : interval.toFixed(2))
             : "?";
-        const signal = chaserInfo.currentSignal ? ` • ${t('active')} ${chaserInfo.currentSignal}` : "";
-        chaserStatus.textContent = `${t('chaser_running')} (${t('every')} ${intervalText} ${getCurrentLanguage() === 'tr' ? 'sn' : 'sec'}).${signal}`;
+        const unit = getCurrentLanguage() === 'tr' ? 'sn' : 'sec';
+        if (chaserInfo.mode === "codes") {
+            const details = [];
+            if (chaserInfo.currentCode) {
+                details.push(`${t('current_code')} ${chaserInfo.currentCode}`);
+            }
+            if (typeof chaserInfo.codeCount === "number") {
+                details.push(`${t('code_total')} ${chaserInfo.codeCount}`);
+            }
+            const suffix = details.length ? ` ${details.join(' • ')}` : "";
+            chaserStatus.textContent = `${t('code_chaser_running')} (${t('every')} ${intervalText} ${unit}).${suffix}`;
+        } else {
+            const signal = chaserInfo.currentSignal ? ` • ${t('active')} ${chaserInfo.currentSignal}` : "";
+            chaserStatus.textContent = `${t('chaser_running')} (${t('every')} ${intervalText} ${unit}).${signal}`;
+        }
     } else {
-        chaserStatus.textContent = t('chaser_ready');
+        const readyKey = state.chaserMode === "codes" ? 'code_chaser_ready' : 'chaser_ready';
+        chaserStatus.textContent = t(readyKey);
     }
 }
 
@@ -690,6 +854,54 @@ messageSelector.addEventListener("change", (event) => {
     refreshChaserStatus();
 });
 
+if (chaserModeRadios.length) {
+    chaserModeRadios.forEach((radio) => {
+        radio.addEventListener("change", () => {
+            if (!radio.checked) {
+                return;
+            }
+            const activeChaser = state.signalChaser && state.selectedMessage
+                && state.signalChaser.messageName === state.selectedMessage.name;
+            if (activeChaser) {
+                setChaserModeValue(state.signalChaser.mode || "signals");
+                return;
+            }
+            setChaserModeValue(radio.value);
+            if (!state.selectedMessage) {
+                chaserStatus.textContent = t('select_message_first');
+            } else {
+                const readyKey = radio.value === "codes" ? 'code_chaser_ready' : 'chaser_ready';
+                chaserStatus.textContent = t(readyKey);
+            }
+        });
+    });
+}
+
+if (codeSourceRadios.length) {
+    codeSourceRadios.forEach((radio) => {
+        radio.addEventListener("change", () => {
+            if (!radio.checked) {
+                return;
+            }
+            const activeChaser = state.signalChaser && state.selectedMessage
+                && state.signalChaser.messageName === state.selectedMessage.name
+                && state.signalChaser.mode === "codes";
+            if (activeChaser) {
+                setCodeSourceValue(state.signalChaser.codeSource || "excel");
+                return;
+            }
+            setCodeSourceValue(radio.value);
+        });
+    });
+}
+
+if (codeExcelInput) {
+    codeExcelInput.addEventListener("change", async () => {
+        const file = codeExcelInput.files?.[0];
+        await uploadCodeExcel(file);
+    });
+}
+
 messageForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (!state.selectedMessage) {
@@ -799,14 +1011,38 @@ if (chaserStartButton) {
             chaserStatus.textContent = t('interval_must_be_positive');
             return;
         }
+        const mode = state.chaserMode || "signals";
         const payload = {
             messageName: state.selectedMessage.name,
             intervalSeconds: interval,
+            mode,
         };
+        if (mode === "codes") {
+            const source = state.codeSource || "excel";
+            payload.codeSource = source;
+            if (source === "excel") {
+                if (!state.codeUpload || !Array.isArray(state.codeUpload.codes) || !state.codeUpload.codes.length) {
+                    chaserStatus.textContent = t('code_excel_required');
+                    return;
+                }
+                payload.codes = state.codeUpload.codes;
+            } else {
+                const startValue = codeRangeStartInput?.value?.trim();
+                const endValue = codeRangeEndInput?.value?.trim();
+                if (!startValue || !endValue) {
+                    chaserStatus.textContent = t('code_range_required');
+                    return;
+                }
+                payload.codeRangeStart = startValue;
+                payload.codeRangeEnd = endValue;
+            }
+        }
         try {
             const response = await api.post("/api/messages/chaser/start", payload);
-            setChaserState(response.task || response);
-            chaserStatus.textContent = t('chaser_started');
+            const task = response.task || response;
+            setChaserState(task);
+            const startedKey = mode === "codes" ? 'code_chaser_started' : 'chaser_started';
+            chaserStatus.textContent = t(startedKey);
             await refreshChaserStatus();
         } catch (error) {
             chaserStatus.textContent = `${t('error')} ${error.message || error}`;
@@ -821,11 +1057,13 @@ if (chaserStopButton) {
             return;
         }
         try {
+            const previousMode = state.signalChaser?.mode;
             const response = await api.post("/api/messages/chaser/stop", {
                 messageName: state.selectedMessage.name,
             });
             setChaserState(null);
-            chaserStatus.textContent = t('chaser_stopped');
+            const stoppedKey = previousMode === "codes" ? 'code_chaser_stopped' : 'chaser_stopped';
+            chaserStatus.textContent = t(stoppedKey);
             await refreshChaserStatus();
         } catch (error) {
             chaserStatus.textContent = `${t('error')} ${error.message || error}`;

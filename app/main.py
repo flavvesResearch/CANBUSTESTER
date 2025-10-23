@@ -8,10 +8,12 @@ import os
 import sys
 import threading
 import time
+import unicodedata
 from contextlib import redirect_stdout
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Literal
 
+import openpyxl
 from fastapi import File, FastAPI, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -79,7 +81,9 @@ def _detect_can_interfaces() -> list[Dict[str, Any]]:
 
 
 class SignalChaserManager:
-    """Sequentially toggles signals to their max/min values on a timer."""
+    """Manages automated signal and error-code emission workflows."""
+
+    MAX_CODES = 4096
 
     def __init__(
         self,
@@ -95,7 +99,15 @@ class SignalChaserManager:
     def set_notifier(self, notifier: Callable[[str, Dict[str, Any]], None]) -> None:
         self._notifier = notifier
 
-    def start(self, message_name: str, interval_seconds: float) -> Dict[str, Any]:
+    def start(
+        self,
+        message_name: str,
+        interval_seconds: float,
+        *,
+        mode: str = "signals",
+        codes: Optional[List[int]] = None,
+        source: Optional[str] = None,
+    ) -> Dict[str, Any]:
         if interval_seconds <= 0:
             raise ValueError("Süre 0'dan büyük olmalı.")
 
@@ -103,6 +115,15 @@ class SignalChaserManager:
             if message_name in self._tasks:
                 raise RuntimeError("Bu mesaj için sinyal taraması zaten çalışıyor.")
 
+        if mode == "signals":
+            return self._start_signal_scan(message_name, interval_seconds)
+        if mode == "codes":
+            if not codes:
+                raise ValueError("Gönderilecek hata kodu bulunamadı.")
+            return self._start_code_scan(message_name, interval_seconds, codes, source=source)
+        raise ValueError("Geçersiz tarama modu.")
+
+    def _start_signal_scan(self, message_name: str, interval_seconds: float) -> Dict[str, Any]:
         try:
             message = self._dbc_manager.get_message_by_name(message_name)
         except KeyError as exc:
@@ -121,14 +142,77 @@ class SignalChaserManager:
             "messageName": message_name,
             "intervalSeconds": interval_seconds,
             "startedAt": started_at,
+            "mode": "signals",
             "signals": [signal.name for signal in signals],
             "currentSignal": None,
+            "currentCode": None,
+            "currentIndex": None,
         }
 
         thread = threading.Thread(
-            target=self._run,
+            target=self._run_signal_scan,
             args=(message_name, signals, interval_seconds, stop_event),
             name=f"signal-chaser-{message_name}",
+            daemon=True,
+        )
+
+        with self._lock:
+            self._tasks[message_name] = {
+                "thread": thread,
+                "stop": stop_event,
+                "info": info,
+            }
+
+        thread.start()
+        return info.copy()
+
+    def _start_code_scan(
+        self,
+        message_name: str,
+        interval_seconds: float,
+        codes: List[int],
+        *,
+        source: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        try:
+            message = self._dbc_manager.get_message_by_name(message_name)
+        except KeyError as exc:
+            raise RuntimeError("Mesaj bulunamadı.") from exc
+
+        status = self._can_manager.get_status()
+        if not status.get("configured"):
+            raise RuntimeError("Önce CAN arayüzünü yapılandırın.")
+
+        if len(codes) > self.MAX_CODES:
+            raise ValueError(f"En fazla {self.MAX_CODES} hata kodu gönderilebilir.")
+
+        filtered_codes = [code for code in codes if code is not None]
+        if not filtered_codes:
+            raise ValueError("Geçerli hata kodu bulunamadı.")
+
+        stop_event = threading.Event()
+        started_at = time.time()
+        byte_length = int(message.length or 8)
+        if byte_length <= 0:
+            byte_length = 8
+        info: Dict[str, Any] = {
+            "messageName": message_name,
+            "intervalSeconds": interval_seconds,
+            "startedAt": started_at,
+            "mode": "codes",
+            "codeSource": source,
+            "codeCount": len(filtered_codes),
+            "codePreview": [self._format_code(code, byte_length * 2) for code in filtered_codes[:5]],
+            "codeHexWidth": byte_length * 2,
+            "currentSignal": None,
+            "currentCode": None,
+            "currentIndex": None,
+        }
+
+        thread = threading.Thread(
+            target=self._run_code_scan,
+            args=(message_name, message, tuple(filtered_codes), interval_seconds, stop_event),
+            name=f"code-chaser-{message_name}",
             daemon=True,
         )
 
@@ -169,7 +253,7 @@ class SignalChaserManager:
             except RuntimeError:
                 continue
 
-    def _run(
+    def _run_signal_scan(
         self,
         message_name: str,
         signals: List[Any],
@@ -189,7 +273,7 @@ class SignalChaserManager:
 
             try:
                 encoded = self._dbc_manager.encode(message_name, payload)
-                self._send(message_name, encoded)
+                self._send(message_name, encoded, mode="signals")
                 self._update_current_signal(message_name, current_signal.name)
             except Exception as exc:  # pragma: no cover - runtime safety
                 logger.exception("Sinyal taraması gönderim hatası: %s", exc)
@@ -198,23 +282,94 @@ class SignalChaserManager:
                 break
             index = (index + 1) % signal_count
 
-        with self._lock:
-            if message_name in self._tasks:
-                self._tasks[message_name]["info"]["currentSignal"] = None
+        self._update_current_signal(message_name, None)
 
-    def _send(self, message_name: str, encoded: Dict[str, Any]) -> None:
+    def _run_code_scan(
+        self,
+        message_name: str,
+        message: Any,
+        codes: tuple[int, ...],
+        interval_seconds: float,
+        stop_event: threading.Event,
+    ) -> None:
+        index = 0
+        code_count = len(codes)
+        byte_length = int(message.length or 8)
+        if byte_length <= 0:
+            byte_length = 8
+
+        while not stop_event.is_set():
+            code = codes[index]
+
+            try:
+                encoded = self._encode_code_payload(message, code, byte_length)
+                encoded["code"] = code
+                self._send(message_name, encoded, mode="codes")
+                self._update_current_code(message_name, code, index, byte_length * 2)
+            except Exception as exc:  # pragma: no cover - runtime safety
+                logger.exception("Hata kodu taraması gönderim hatası: %s", exc)
+
+            if stop_event.wait(interval_seconds):
+                break
+            index = (index + 1) % code_count
+
+        self._update_current_code(message_name, None, None, byte_length * 2)
+
+    def _encode_code_payload(self, message: Any, code: int, byte_length: int) -> Dict[str, Any]:
+        if code < 0:
+            raise ValueError("Hata kodu negatif olamaz.")
+
+        max_value = (1 << (byte_length * 8)) - 1
+        if code > max_value:
+            raise ValueError("Hata kodu mesaj uzunluğunu aşıyor.")
+
+        data = code.to_bytes(byte_length, byteorder="big")
+        return {
+            "arbitration_id": message.frame_id,
+            "data": data,
+            "is_extended": message.is_extended_frame,
+            "dlc": byte_length,
+        }
+
+    def _send(self, message_name: str, encoded: Dict[str, Any], *, mode: str) -> None:
         message = _build_can_message(encoded)
         self._can_manager.send(message)
         if self._notifier:
-            self._notifier(message_name, encoded)
+            payload = dict(encoded)
+            payload.setdefault("mode", mode)
+            self._notifier(message_name, payload)
 
-    def _update_current_signal(self, message_name: str, signal_name: str) -> None:
+    def _update_current_signal(self, message_name: str, signal_name: Optional[str]) -> None:
         with self._lock:
             task = self._tasks.get(message_name)
             if not task:
                 return
             task["info"]["currentSignal"] = signal_name
-            task["info"]["lastSentAt"] = time.time()
+            if signal_name is not None:
+                task["info"]["lastSentAt"] = time.time()
+            else:
+                task["info"]["lastSentAt"] = time.time()
+
+    def _update_current_code(
+        self,
+        message_name: str,
+        code_value: Optional[int],
+        index: Optional[int],
+        hex_width: int,
+    ) -> None:
+        with self._lock:
+            task = self._tasks.get(message_name)
+            if not task:
+                return
+            info = task["info"]
+            info["currentIndex"] = index
+            if code_value is None:
+                info["currentCode"] = None
+            else:
+                info["currentCode"] = self._format_code(code_value, hex_width)
+                info["lastSentAt"] = time.time()
+            if code_value is None:
+                info["lastSentAt"] = time.time()
 
     @staticmethod
     def _min_value(signal: Any) -> float:
@@ -250,6 +405,11 @@ class SignalChaserManager:
         if isinstance(length, int) and length > 0:
             return float((1 << length) - 1)
         return 1.0
+
+    @staticmethod
+    def _format_code(code: int, hex_width: int) -> str:
+        width = max(2, hex_width)
+        return f"0x{code:0{width}X}"
 class MessageBroadcaster:
     """Tracks websocket connections and sends events to all clients."""
 
@@ -349,6 +509,11 @@ class RecordingStartRequest(BaseModel):
 class SignalChaserStartRequest(BaseModel):
     message_name: str = Field(alias="messageName")
     interval_seconds: float = Field(alias="intervalSeconds", gt=0)
+    mode: Literal["signals", "codes"] = Field(default="signals")
+    code_source: Optional[Literal["excel", "manual"]] = Field(default=None, alias="codeSource")
+    codes: Optional[List[Any]] = Field(default=None)
+    code_range_start: Optional[str] = Field(default=None, alias="codeRangeStart")
+    code_range_end: Optional[str] = Field(default=None, alias="codeRangeEnd")
 
 
 class SignalChaserStopRequest(BaseModel):
@@ -362,6 +527,46 @@ def _build_can_message(encoded: Dict[str, Any]) -> can.Message:
         dlc=encoded["dlc"],
         is_extended_id=encoded["is_extended"],
     )
+
+
+def _parse_code_value(raw: Any) -> int:
+    if raw is None:
+        raise ValueError("Boş değer.")
+    if isinstance(raw, bool):
+        raise ValueError("Geçersiz değer.")
+    if isinstance(raw, int):
+        if raw < 0:
+            raise ValueError("Hata kodu negatif olamaz.")
+        return raw
+    if isinstance(raw, float):
+        if math.isnan(raw) or math.isinf(raw) or not raw.is_integer():
+            raise ValueError("Hata kodu sayısı geçersiz.")
+        value = int(raw)
+        if value < 0:
+            raise ValueError("Hata kodu negatif olamaz.")
+        return value
+
+    text = str(raw).strip()
+    if not text:
+        raise ValueError("Boş değer.")
+    cleaned = text.replace(" ", "")
+    if cleaned.lower().startswith("0x"):
+        cleaned = cleaned[2:]
+    if cleaned.endswith(("h", "H")):
+        cleaned = cleaned[:-1]
+    cleaned = cleaned.replace("_", "")
+
+    try:
+        value = int(cleaned, 16)
+    except ValueError as exc:
+        try:
+            value = int(cleaned, 10)
+        except ValueError as second_exc:
+            raise ValueError(f"'{text}' değeri hata koduna dönüştürülemedi.") from second_exc
+
+    if value < 0:
+        raise ValueError("Hata kodu negatif olamaz.")
+    return value
 
 
 def _handle_tx_event(
@@ -381,6 +586,12 @@ def _handle_tx_event(
         "data": list(encoded["data"]),
         "timestamp": timestamp,
     }
+    mode = encoded.get("mode")
+    if mode:
+        payload["mode"] = mode
+    code_value = encoded.get("code")
+    if code_value is not None:
+        payload["code"] = code_value
     broadcaster.send_threadsafe(payload)
     recording_manager.append_event(payload)
 
@@ -499,12 +710,153 @@ async def get_signal_chaser_status(message_name: Optional[str] = Query(default=N
     return {"tasks": tasks}
 
 
+@app.post("/api/messages/chaser/codes/upload")
+async def upload_chaser_codes(file: UploadFile = File(...)) -> Dict[str, Any]:
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Excel dosyası boş olamaz.")
+
+    try:
+        workbook = openpyxl.load_workbook(io.BytesIO(contents), data_only=True)
+    except Exception as exc:
+        logger.exception("Excel dosyası okunamadı: %s", exc)
+        raise HTTPException(status_code=400, detail="Excel dosyası okunamadı.")
+
+    sheet = workbook.active
+    header_aliases = {
+        "hata kodları (hex)",
+        "hata kodları hex",
+        "hata kodları",
+        "hatakodları(hex)",
+        "hatakodlari(hex)",
+        "error codes (hex)",
+        "error codes hex",
+        "error codes",
+        "errorcodes(hex)",
+        "errorcodes",
+    }
+
+    def _normalise_header(value: str) -> str:
+        compact = " ".join(value.strip().split())
+        normalized = unicodedata.normalize("NFKD", compact).lower()
+        return "".join(ch for ch in normalized if ch.isalnum())
+
+    normalised_aliases = {_normalise_header(alias) for alias in header_aliases}
+
+    target_column: Optional[int] = None
+    header_row_index: Optional[int] = None
+
+    for row_index, row in enumerate(sheet.iter_rows(min_row=1, max_row=sheet.max_row, values_only=True), start=1):
+        for column_index, cell in enumerate(row, start=1):
+            if isinstance(cell, str):
+                candidate = _normalise_header(cell)
+                if candidate in normalised_aliases:
+                    target_column = column_index
+                    header_row_index = row_index
+                    break
+        if target_column is not None:
+            break
+
+    if target_column is None or header_row_index is None:
+        # Fallback: try first non-empty column if there is only one column with data
+        non_empty_columns = set()
+        for row in sheet.iter_rows(min_row=1, max_row=sheet.max_row, values_only=True):
+            for column_index, cell in enumerate(row, start=1):
+                if cell not in (None, "", " "):
+                    non_empty_columns.add(column_index)
+        if len(non_empty_columns) == 1:
+            target_column = non_empty_columns.pop()
+            header_row_index = 0
+        else:
+            raise HTTPException(status_code=400, detail="Excel dosyasında 'HATA KODLARI (hex)' başlığı bulunamadı.")
+
+    codes: List[int] = []
+    invalid_count = 0
+
+    for row_index in range(header_row_index + 1, sheet.max_row + 1):
+        value = sheet.cell(row=row_index, column=target_column).value
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        try:
+            code_value = _parse_code_value(value)
+        except ValueError:
+            invalid_count += 1
+            continue
+        codes.append(code_value)
+
+    if not codes:
+        raise HTTPException(status_code=400, detail="Excel dosyasında geçerli hata kodu bulunamadı.")
+
+    truncated = False
+    original_count = len(codes)
+    if original_count > SignalChaserManager.MAX_CODES:
+        codes = codes[: SignalChaserManager.MAX_CODES]
+        truncated = True
+
+    max_bits = max(code.bit_length() for code in codes) if codes else 1
+    hex_digits = max(2, (max_bits + 3) // 4)
+    if hex_digits % 2 != 0:
+        hex_digits += 1
+    codes_payload = [f"0x{code:0{hex_digits}X}" for code in codes]
+
+    return {
+        "fileName": file.filename,
+        "count": len(codes_payload),
+        "originalCount": original_count,
+        "invalidCount": invalid_count,
+        "truncated": truncated,
+        "maxAllowed": SignalChaserManager.MAX_CODES,
+        "hexDigits": hex_digits,
+        "codes": codes_payload,
+    }
+
+
 @app.post("/api/messages/chaser/start")
 async def start_signal_chaser(request: SignalChaserStartRequest) -> Dict[str, Any]:
     if not dbc_manager.is_loaded():
         raise HTTPException(status_code=400, detail="Önce bir DBC dosyası yükleyin.")
     try:
-        task = signal_chaser.start(request.message_name, request.interval_seconds)
+        if request.mode == "codes":
+            codes: List[int] = []
+
+            if request.codes:
+                for raw in request.codes:
+                    try:
+                        codes.append(_parse_code_value(raw))
+                    except ValueError as exc:
+                        raise HTTPException(status_code=400, detail=str(exc)) from exc
+            elif request.code_range_start is not None and request.code_range_end is not None:
+                try:
+                    range_start = _parse_code_value(request.code_range_start)
+                    range_end = _parse_code_value(request.code_range_end)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+                if range_end < range_start:
+                    range_start, range_end = range_end, range_start
+                range_size = (range_end - range_start) + 1
+                if range_size > SignalChaserManager.MAX_CODES:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"En fazla {SignalChaserManager.MAX_CODES} kod gönderilebilir. Lütfen aralığı daraltın.",
+                    )
+                codes = [range_start + offset for offset in range(range_size)]
+            else:
+                raise HTTPException(status_code=400, detail="Excel ya da manuel kod seçeneği belirlenmedi.")
+
+            if not codes:
+                raise HTTPException(status_code=400, detail="Gönderilecek hata kodu bulunamadı.")
+
+            task = signal_chaser.start(
+                request.message_name,
+                request.interval_seconds,
+                mode="codes",
+                codes=codes,
+                source=request.code_source,
+            )
+        else:
+            task = signal_chaser.start(request.message_name, request.interval_seconds)
         return {"status": "running", "task": task}
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
