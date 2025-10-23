@@ -108,6 +108,7 @@ class SignalChaserManager:
         codes: Optional[List[int]] = None,
         source: Optional[str] = None,
         descriptions: Optional[Dict[int, str]] = None,
+        target_signal: Optional[str] = None,
     ) -> Dict[str, Any]:
         if interval_seconds <= 0:
             raise ValueError("Süre 0'dan büyük olmalı.")
@@ -121,6 +122,16 @@ class SignalChaserManager:
         if mode == "codes":
             if not codes:
                 raise ValueError("Gönderilecek hata kodu bulunamadı.")
+            # Check if this is decimal mode (source == "excel-decimal" and target_signal is set)
+            if source == "excel-decimal" and target_signal:
+                return self._start_code_scan_decimal(
+                    message_name,
+                    interval_seconds,
+                    codes,
+                    target_signal,
+                    source=source,
+                    descriptions=descriptions,
+                )
             return self._start_code_scan(
                 message_name,
                 interval_seconds,
@@ -254,6 +265,90 @@ class SignalChaserManager:
         thread.start()
         return info.copy()
 
+    def _start_code_scan_decimal(
+        self,
+        message_name: str,
+        interval_seconds: float,
+        codes: List[int],
+        target_signal: str,
+        *,
+        source: Optional[str] = None,
+        descriptions: Optional[Dict[int, str]] = None,
+    ) -> Dict[str, Any]:
+        """Start code scan using decimal values assigned to a specific signal."""
+        try:
+            message = self._dbc_manager.get_message_by_name(message_name)
+        except KeyError as exc:
+            raise RuntimeError("Mesaj bulunamadı.") from exc
+
+        # Verify target signal exists
+        signal_names = [signal.name for signal in message.signals]
+        if target_signal not in signal_names:
+            raise RuntimeError(f"Sinyal '{target_signal}' bu mesajda bulunamadı.")
+
+        status = self._can_manager.get_status()
+        if not status.get("configured"):
+            raise RuntimeError("Önce CAN arayüzünü yapılandırın.")
+
+        if len(codes) > self.MAX_CODES:
+            raise ValueError(f"En fazla {self.MAX_CODES} hata kodu gönderilebilir.")
+
+        filtered_codes = [code for code in codes if code is not None]
+        if not filtered_codes:
+            raise ValueError("Geçerli hata kodu bulunamadı.")
+
+        stop_event = threading.Event()
+        started_at = time.time()
+        code_lookup: Dict[int, str] = {}
+        if descriptions:
+            for code, text in descriptions.items():
+                if isinstance(code, int) and isinstance(text, str):
+                    code_lookup[code] = text.strip()
+
+        info: Dict[str, Any] = {
+            "messageName": message_name,
+            "intervalSeconds": interval_seconds,
+            "startedAt": started_at,
+            "mode": "codes",
+            "codeSource": source,
+            "targetSignal": target_signal,
+            "codeCount": len(filtered_codes),
+            "codePreview": filtered_codes[:5],
+            "currentSignal": target_signal,
+            "currentCode": None,
+            "currentIndex": None,
+            "currentDescription": None,
+        }
+        if code_lookup:
+            info["codeDescriptions"] = code_lookup
+            info["codeDescriptionsCount"] = len(code_lookup)
+
+        thread = threading.Thread(
+            target=self._run_code_scan_decimal,
+            args=(
+                message_name,
+                message,
+                tuple(filtered_codes),
+                target_signal,
+                interval_seconds,
+                stop_event,
+                code_lookup,
+            ),
+            name=f"code-decimal-chaser-{message_name}",
+            daemon=True,
+        )
+
+        with self._lock:
+            self._tasks[message_name] = {
+                "thread": thread,
+                "stop": stop_event,
+                "info": info,
+                "descriptions": code_lookup,
+            }
+
+        thread.start()
+        return info.copy()
+
     def stop(self, message_name: str) -> Dict[str, Any]:
         with self._lock:
             task = self._tasks.get(message_name)
@@ -346,6 +441,51 @@ class SignalChaserManager:
             index = (index + 1) % code_count
 
         self._update_current_code(message_name, None, None, byte_length * 2, None)
+
+    def _run_code_scan_decimal(
+        self,
+        message_name: str,
+        message: Any,
+        codes: tuple[int, ...],
+        target_signal: str,
+        interval_seconds: float,
+        stop_event: threading.Event,
+        descriptions: Dict[int, str],
+    ) -> None:
+        """Run code scan by assigning decimal values to a specific signal."""
+        index = 0
+        code_count = len(codes)
+
+        while not stop_event.is_set():
+            code = codes[index]
+            description = descriptions.get(code) if descriptions else None
+
+            try:
+                # Build signal payload: set target signal to decimal code value
+                # All other signals set to their minimum or initial values
+                signal_values: Dict[str, Any] = {}
+                for signal in message.signals:
+                    if signal.name == target_signal:
+                        signal_values[signal.name] = code
+                    else:
+                        signal_values[signal.name] = self._min_value(signal)
+
+                # Encode using DBC
+                encoded = self._dbc_manager.encode(message_name, signal_values)
+                encoded["code"] = code
+                if description:
+                    encoded["description"] = description
+                self._send(message_name, encoded, mode="codes")
+                # Use hex width of 1 for decimal display (just show as decimal number)
+                self._update_current_code(message_name, code, index, 1, description)
+            except Exception as exc:  # pragma: no cover - runtime safety
+                logger.exception("Hata kodu decimal taraması gönderim hatası: %s", exc)
+
+            if stop_event.wait(interval_seconds):
+                break
+            index = (index + 1) % code_count
+
+        self._update_current_code(message_name, None, None, 1, None)
 
     def _encode_code_payload(self, message: Any, code: int, byte_length: int) -> Dict[str, Any]:
         if code < 0:
@@ -444,6 +584,10 @@ class SignalChaserManager:
 
     @staticmethod
     def _format_code(code: int, hex_width: int) -> str:
+        # If hex_width is 1, format as decimal (for decimal mode)
+        if hex_width == 1:
+            return str(code)
+        # Otherwise format as hex
         width = max(2, hex_width)
         return f"0x{code:0{width}X}"
 class MessageBroadcaster:
@@ -546,8 +690,9 @@ class SignalChaserStartRequest(BaseModel):
     message_name: str = Field(alias="messageName")
     interval_seconds: float = Field(alias="intervalSeconds", gt=0)
     mode: Literal["signals", "codes"] = Field(default="signals")
-    code_source: Optional[Literal["excel", "manual"]] = Field(default=None, alias="codeSource")
+    code_source: Optional[Literal["excel", "excel-decimal", "manual"]] = Field(default=None, alias="codeSource")
     codes: Optional[List[Any]] = Field(default=None)
+    target_signal: Optional[str] = Field(default=None, alias="targetSignal")
     code_range_start: Optional[str] = Field(default=None, alias="codeRangeStart")
     code_range_end: Optional[str] = Field(default=None, alias="codeRangeEnd")
     code_descriptions: Optional[Dict[str, Any]] = Field(default=None, alias="codeDescriptions")
@@ -871,6 +1016,124 @@ async def upload_chaser_codes(file: UploadFile = File(...)) -> Dict[str, Any]:
     }
 
 
+@app.post("/api/messages/chaser/codes/upload-decimal")
+async def upload_chaser_codes_decimal(file: UploadFile = File(...)) -> Dict[str, Any]:
+    """Upload Excel file with hex codes, convert to decimal values for signal assignment."""
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Excel dosyası boş olamaz.")
+
+    try:
+        workbook = openpyxl.load_workbook(io.BytesIO(contents), data_only=True)
+    except Exception as exc:
+        logger.exception("Excel dosyası okunamadı: %s", exc)
+        raise HTTPException(status_code=400, detail="Excel dosyası okunamadı.")
+
+    sheet = workbook.active
+    header_aliases = {
+        "hata kodları (hex)",
+        "hata kodları hex",
+        "hata kodları",
+        "hatakodları(hex)",
+        "hatakodlari(hex)",
+        "error codes (hex)",
+        "error codes hex",
+        "error codes",
+        "errorcodes(hex)",
+        "errorcodes",
+    }
+
+    def _normalise_header(value: str) -> str:
+        compact = " ".join(value.strip().split())
+        normalized = unicodedata.normalize("NFKD", compact).lower()
+        return "".join(ch for ch in normalized if ch.isalnum())
+
+    normalised_aliases = {_normalise_header(alias) for alias in header_aliases}
+
+    target_column: Optional[int] = None
+    header_row_index: Optional[int] = None
+    description_column: Optional[int] = None
+    description_headers = {
+        "hata başlıkları",
+        "hatabaşlıkları",
+        "hata açıklaması",
+        "hata aciklamasi",
+        "description",
+        "error description",
+        "error titles",
+    }
+    normalised_description_headers = {_normalise_header(alias) for alias in description_headers}
+
+    for row_index, row in enumerate(sheet.iter_rows(min_row=1, max_row=sheet.max_row, values_only=True), start=1):
+        for column_index, cell in enumerate(row, start=1):
+            if isinstance(cell, str):
+                candidate = _normalise_header(cell)
+                if target_column is None and candidate in normalised_aliases:
+                    target_column = column_index
+                    header_row_index = row_index
+                if description_column is None and candidate in normalised_description_headers:
+                    description_column = column_index
+        if target_column is not None:
+            break
+
+    if target_column is None or header_row_index is None:
+        # Fallback: try first non-empty column if there is only one column with data
+        non_empty_columns = set()
+        for row in sheet.iter_rows(min_row=1, max_row=sheet.max_row, values_only=True):
+            for column_index, cell in enumerate(row, start=1):
+                if cell not in (None, "", " "):
+                    non_empty_columns.add(column_index)
+        if len(non_empty_columns) == 1:
+            target_column = non_empty_columns.pop()
+            header_row_index = 0
+        else:
+            raise HTTPException(status_code=400, detail="Excel dosyasında 'HATA KODLARI (hex)' başlığı bulunamadı.")
+
+    codes: List[int] = []
+    code_descriptions: Dict[int, str] = {}
+    invalid_count = 0
+
+    for row_index in range(header_row_index + 1, sheet.max_row + 1):
+        value = sheet.cell(row=row_index, column=target_column).value
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        try:
+            code_value = _parse_code_value(value)
+        except ValueError:
+            invalid_count += 1
+            continue
+        codes.append(code_value)
+        if description_column is not None and row_index <= sheet.max_row:
+            description_raw = sheet.cell(row=row_index, column=description_column).value
+            if isinstance(description_raw, str) and description_raw.strip():
+                code_descriptions[code_value] = description_raw.strip()
+
+    if not codes:
+        raise HTTPException(status_code=400, detail="Excel dosyasında geçerli hata kodu bulunamadı.")
+
+    truncated = False
+    original_count = len(codes)
+    if original_count > SignalChaserManager.MAX_CODES:
+        codes = codes[: SignalChaserManager.MAX_CODES]
+        truncated = True
+
+    # Return decimal values as integers (not hex strings)
+    codes_payload = codes
+
+    return {
+        "fileName": file.filename,
+        "count": len(codes_payload),
+        "originalCount": original_count,
+        "invalidCount": invalid_count,
+        "truncated": truncated,
+        "maxAllowed": SignalChaserManager.MAX_CODES,
+        "codes": codes_payload,
+        "descriptions": {code: text for code, text in code_descriptions.items()},
+    }
+
+
 @app.post("/api/messages/chaser/start")
 async def start_signal_chaser(request: SignalChaserStartRequest) -> Dict[str, Any]:
     if not dbc_manager.is_loaded():
@@ -925,6 +1188,7 @@ async def start_signal_chaser(request: SignalChaserStartRequest) -> Dict[str, An
                 codes=codes,
                 source=request.code_source,
                 descriptions=description_map or None,
+                target_signal=request.target_signal,
             )
         else:
             task = signal_chaser.start(request.message_name, request.interval_seconds)

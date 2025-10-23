@@ -117,6 +117,10 @@
                                 <span data-i18n="code_source_excel">Excel ile gönder</span>
                             </label>
                             <label>
+                                <input type="radio" name="code-source" value="excel-decimal">
+                                <span data-i18n="code_source_excel_decimal">Excel ile decimal gönder</span>
+                            </label>
+                            <label>
                                 <input type="radio" name="code-source" value="manual">
                                 <span data-i18n="code_source_manual">Manuel aralık</span>
                             </label>
@@ -127,6 +131,19 @@
                                 <span id="code-excel-label" data-i18n="code_excel_select">Excel dosyası seçin</span>
                             </label>
                             <div id="code-excel-status" class="help-text" data-i18n="code_excel_help">Dosyayı yükleyerek hata kodlarını getirin.</div>
+                        </div>
+                        <div id="code-source-excel-decimal" class="code-source-panel hidden">
+                            <label class="file-picker">
+                                <input id="code-excel-decimal-file" type="file" accept=".xlsx,.xls">
+                                <span id="code-excel-decimal-label" data-i18n="code_excel_select">Excel dosyası seçin</span>
+                            </label>
+                            <div id="decimal-signal-selector" class="field hidden">
+                                <label for="decimal-target-signal" data-i18n="decimal_target_signal">Hedef Sinyal</label>
+                                <select id="decimal-target-signal" disabled>
+                                    <option data-i18n="select_message_first">Önce mesaj seçin</option>
+                                </select>
+                            </div>
+                            <div id="code-excel-decimal-status" class="help-text" data-i18n="code_excel_help">Dosyayı yükleyerek hata kodlarını getirin.</div>
                         </div>
                         <div id="code-source-manual" class="code-source-panel hidden">
                             <div class="field inline">

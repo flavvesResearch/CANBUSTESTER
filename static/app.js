@@ -15,6 +15,7 @@ const state = {
     chaserMode: "signals",
     codeSource: "excel",
     codeUpload: null,
+    codeDecimalUpload: null,
 };
 
 const interfaceForm = document.getElementById("interface-form");
@@ -57,6 +58,12 @@ const codeExcelInput = document.getElementById("code-excel-file");
 const codeExcelLabel = document.getElementById("code-excel-label");
 const codeExcelStatus = document.getElementById("code-excel-status");
 const codeExcelPanel = document.getElementById("code-source-excel");
+const codeExcelDecimalPanel = document.getElementById("code-source-excel-decimal");
+const codeExcelDecimalInput = document.getElementById("code-excel-decimal-file");
+const codeExcelDecimalLabel = document.getElementById("code-excel-decimal-label");
+const codeExcelDecimalStatus = document.getElementById("code-excel-decimal-status");
+const decimalSignalSelector = document.getElementById("decimal-target-signal");
+const decimalSignalSelectorContainer = document.getElementById("decimal-signal-selector");
 const codeManualPanel = document.getElementById("code-source-manual");
 const codeRangeStartInput = document.getElementById("code-range-start");
 const codeRangeEndInput = document.getElementById("code-range-end");
@@ -93,6 +100,7 @@ function updateTranslations() {
     renderInterfaceStatus(state.interfaces.length ? { configured: true } : { configured: false });
     
     renderCodeUploadState();
+    renderCodeDecimalUploadState();
     setChaserState(state.signalChaser);
     
     setRecordingState(state.recordingActive);
@@ -213,8 +221,63 @@ function renderCodeUploadState() {
     }
 }
 
+function renderCodeDecimalUploadState() {
+    if (!codeExcelDecimalLabel || !codeExcelDecimalStatus) {
+        return;
+    }
+    const upload = state.codeDecimalUpload;
+    if (upload && Array.isArray(upload.codes) && upload.codes.length) {
+        codeExcelDecimalLabel.textContent = `${upload.fileName || t('code_excel_select')} (${upload.count})`;
+        const lang = getCurrentLanguage();
+        const messages = [];
+        messages.push(
+            lang === 'tr'
+                ? `${upload.count} hata kodu hazır (decimal).`
+                : `${upload.count} error codes ready (decimal).`
+        );
+        if (upload.invalidCount) {
+            messages.push(
+                lang === 'tr'
+                    ? `${upload.invalidCount} satır atlandı.`
+                    : `${upload.invalidCount} rows skipped.`
+            );
+        }
+        if (upload.truncated && upload.maxAllowed) {
+            messages.push(
+                lang === 'tr'
+                    ? `İlk ${upload.maxAllowed} kod kullanıldı.`
+                    : `First ${upload.maxAllowed} codes will be used.`
+            );
+        }
+        const descriptionCount = upload.descriptions ? Object.keys(upload.descriptions).length : 0;
+        if (descriptionCount) {
+            messages.push(
+                lang === 'tr'
+                    ? `${descriptionCount} açıklama eşleştirildi.`
+                    : `${descriptionCount} descriptions linked.`
+            );
+        }
+        if (upload.targetSignal) {
+            messages.push(
+                lang === 'tr'
+                    ? `Hedef sinyal: ${upload.targetSignal}`
+                    : `Target signal: ${upload.targetSignal}`
+            );
+        }
+        codeExcelDecimalStatus.textContent = messages.join(" ");
+    } else {
+        codeExcelDecimalLabel.textContent = t('code_excel_select');
+        codeExcelDecimalStatus.textContent = t('code_excel_help');
+    }
+}
+
 function setCodeSourceValue(source, options = {}) {
-    const resolved = source === "manual" ? "manual" : "excel";
+    let resolved = "excel";
+    if (source === "manual") {
+        resolved = "manual";
+    } else if (source === "excel-decimal") {
+        resolved = "excel-decimal";
+    }
     state.codeSource = resolved;
     if (!options.skipRadios && codeSourceRadios.length) {
         codeSourceRadios.forEach((radio) => {
@@ -224,11 +287,17 @@ function setCodeSourceValue(source, options = {}) {
     if (codeExcelPanel) {
         codeExcelPanel.classList.toggle("hidden", resolved !== "excel");
     }
+    if (codeExcelDecimalPanel) {
+        codeExcelDecimalPanel.classList.toggle("hidden", resolved !== "excel-decimal");
+    }
     if (codeManualPanel) {
         codeManualPanel.classList.toggle("hidden", resolved !== "manual");
     }
     if (resolved === "excel") {
         renderCodeUploadState();
+    } else if (resolved === "excel-decimal") {
+        renderCodeDecimalUploadState();
+        updateDecimalSignalSelector();
     }
 }
 
@@ -245,6 +314,77 @@ function setChaserModeValue(mode, options = {}) {
     }
     if (resolved === "codes") {
         setCodeSourceValue(state.codeSource || "excel", options);
+    }
+}
+
+function updateDecimalSignalSelector() {
+    if (!decimalSignalSelector || !decimalSignalSelectorContainer) {
+        return;
+    }
+    
+    if (!state.selectedMessage) {
+        decimalSignalSelectorContainer.classList.add("hidden");
+        decimalSignalSelector.disabled = true;
+        decimalSignalSelector.innerHTML = `<option>${t('select_message_first')}</option>`;
+        return;
+    }
+    
+    decimalSignalSelectorContainer.classList.remove("hidden");
+    decimalSignalSelector.disabled = false;
+    decimalSignalSelector.innerHTML = "";
+    
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = t('select_signal');
+    decimalSignalSelector.append(placeholder);
+    
+    for (const signal of state.selectedMessage.signals) {
+        const option = document.createElement("option");
+        option.value = signal.name;
+        option.textContent = signal.name;
+        decimalSignalSelector.append(option);
+    }
+    
+    // Restore previously selected signal if exists
+    if (state.codeDecimalUpload && state.codeDecimalUpload.targetSignal) {
+        const exists = state.selectedMessage.signals.some(s => s.name === state.codeDecimalUpload.targetSignal);
+        if (exists) {
+            decimalSignalSelector.value = state.codeDecimalUpload.targetSignal;
+        }
+    }
+}
+
+async function uploadCodeExcelDecimal(file) {
+    if (!codeExcelDecimalStatus || !codeExcelDecimalLabel) {
+        return;
+    }
+    if (!file) {
+        state.codeDecimalUpload = null;
+        renderCodeDecimalUploadState();
+        return;
+    }
+    const formData = new FormData();
+    formData.append("file", file);
+    codeExcelDecimalStatus.textContent = t('code_excel_uploading');
+    try {
+        const response = await api.post("/api/messages/chaser/codes/upload-decimal", formData);
+        state.codeDecimalUpload = {
+            fileName: response.fileName || file.name,
+            codes: Array.isArray(response.codes) ? response.codes : [],
+            count: response.count ?? (Array.isArray(response.codes) ? response.codes.length : 0),
+            originalCount: response.originalCount ?? response.count ?? (Array.isArray(response.codes) ? response.codes.length : 0),
+            invalidCount: response.invalidCount || 0,
+            truncated: Boolean(response.truncated),
+            maxAllowed: response.maxAllowed || null,
+            descriptions: response.descriptions && typeof response.descriptions === "object" ? response.descriptions : {},
+            targetSignal: decimalSignalSelector?.value || null,
+        };
+        renderCodeDecimalUploadState();
+    } catch (error) {
+        state.codeDecimalUpload = null;
+        renderCodeDecimalUploadState();
+        codeExcelDecimalStatus.textContent = `${t('error')} ${error.message || error}`;
+        console.error("Excel decimal yükleme hatası", error);
     }
 }
 
@@ -284,6 +424,7 @@ async function uploadCodeExcel(file) {
 setChaserModeValue(state.chaserMode || "signals", { skipRadios: true });
 setCodeSourceValue(state.codeSource || "excel", { skipRadios: true });
 renderCodeUploadState();
+renderCodeDecimalUploadState();
 
 function setManualMode(enabled) {
     state.manualMode = enabled;
@@ -878,6 +1019,7 @@ messageSelector.addEventListener("change", (event) => {
         renderSignals(selected);
         messageFeedback.textContent = "";
     }
+    updateDecimalSignalSelector();
     refreshChaserStatus();
 });
 
@@ -926,6 +1068,22 @@ if (codeExcelInput) {
     codeExcelInput.addEventListener("change", async () => {
         const file = codeExcelInput.files?.[0];
         await uploadCodeExcel(file);
+    });
+}
+
+if (codeExcelDecimalInput) {
+    codeExcelDecimalInput.addEventListener("change", async () => {
+        const file = codeExcelDecimalInput.files?.[0];
+        await uploadCodeExcelDecimal(file);
+    });
+}
+
+if (decimalSignalSelector) {
+    decimalSignalSelector.addEventListener("change", () => {
+        if (state.codeDecimalUpload) {
+            state.codeDecimalUpload.targetSignal = decimalSignalSelector.value;
+            renderCodeDecimalUploadState();
+        }
     });
 }
 
@@ -1055,6 +1213,21 @@ if (chaserStartButton) {
                 payload.codes = state.codeUpload.codes;
                 if (state.codeUpload.descriptions && Object.keys(state.codeUpload.descriptions).length) {
                     payload.codeDescriptions = state.codeUpload.descriptions;
+                }
+            } else if (source === "excel-decimal") {
+                if (!state.codeDecimalUpload || !Array.isArray(state.codeDecimalUpload.codes) || !state.codeDecimalUpload.codes.length) {
+                    chaserStatus.textContent = t('code_excel_required');
+                    return;
+                }
+                const targetSignal = decimalSignalSelector?.value;
+                if (!targetSignal) {
+                    chaserStatus.textContent = t('select_signal_first');
+                    return;
+                }
+                payload.codes = state.codeDecimalUpload.codes;
+                payload.targetSignal = targetSignal;
+                if (state.codeDecimalUpload.descriptions && Object.keys(state.codeDecimalUpload.descriptions).length) {
+                    payload.codeDescriptions = state.codeDecimalUpload.descriptions;
                 }
             } else {
                 const startValue = codeRangeStartInput?.value?.trim();
