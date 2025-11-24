@@ -923,13 +923,48 @@ class SignalChaserManager:
 class MessageBroadcaster:
     """Tracks websocket connections and sends events to all clients."""
 
-    def __init__(self) -> None:
+    def __init__(self, buffer_delay_seconds: float = 0.1) -> None:
         self._connections: set[WebSocket] = set()
         self._lock = asyncio.Lock()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._queue: Optional[asyncio.Queue[Dict[str, Any]]] = None
+        self._broadcast_task: Optional[asyncio.Task[None]] = None
+        self._buffer_delay_seconds = buffer_delay_seconds
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
+        self._queue = asyncio.Queue()
+        self._broadcast_task = loop.create_task(self._broadcast_loop())
+
+    async def shutdown(self) -> None:
+        if self._broadcast_task:
+            self._broadcast_task.cancel()
+            try:
+                await self._broadcast_task
+            except asyncio.CancelledError:
+                pass
+        # Send any remaining messages
+        if self._queue and not self._queue.empty():
+            batch = []
+            while not self._queue.empty():
+                batch.append(self._queue.get_nowait())
+            if batch:
+                await self.broadcast(batch)
+
+    async def _broadcast_loop(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(self._buffer_delay_seconds)
+                if self._queue and not self._queue.empty():
+                    batch = []
+                    while not self._queue.empty():
+                        batch.append(self._queue.get_nowait())
+                    if batch:
+                        await self.broadcast(batch)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("Error in broadcast loop")
 
     async def connect(self, websocket: WebSocket) -> None:
         await websocket.accept()
@@ -940,7 +975,16 @@ class MessageBroadcaster:
         async with self._lock:
             self._connections.discard(websocket)
 
-    async def broadcast(self, payload: Dict[str, Any]) -> None:
+    async def broadcast(self, batch: List[Dict[str, Any]]) -> None:
+        if not batch:
+            return
+        
+        payload: Dict[str, Any]
+        if len(batch) == 1:
+            payload = batch[0]
+        else:
+            payload = {"type": "batch", "messages": batch}
+
         async with self._lock:
             dead: list[WebSocket] = []
             for connection in self._connections:
@@ -952,10 +996,13 @@ class MessageBroadcaster:
                 self._connections.discard(connection)
 
     def send_threadsafe(self, payload: Dict[str, Any]) -> None:
-        if self._loop is None:
+        if self._queue is None:
             logger.debug("No event loop set for broadcaster, dropping payload")
             return
-        asyncio.run_coroutine_threadsafe(self.broadcast(payload), self._loop)
+        try:
+            self._queue.put_nowait(payload)
+        except asyncio.QueueFull:
+            logger.warning("Broadcaster queue is full, dropping payload.")
 
 
 app = FastAPI(title="CAN Bus Tester", version="1.0.0")
@@ -1183,6 +1230,7 @@ async def on_startup() -> None:
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
+    await broadcaster.shutdown()
     can_manager.shutdown()
     signal_chaser.stop_all()
     fault_injection.stop_all()

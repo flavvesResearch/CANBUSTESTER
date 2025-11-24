@@ -1634,7 +1634,13 @@ function connectWebSocket() {
     ws.onmessage = (event) => {
         try {
             const data = JSON.parse(event.data);
-            handleSocketEvent(data);
+            if (data.type === "batch" && Array.isArray(data.messages)) {
+                for (const message of data.messages) {
+                    handleSocketEvent(message);
+                }
+            } else {
+                handleSocketEvent(data);
+            }
         } catch (error) {
             console.error(t('websocket_parse_error'), error);
         }
