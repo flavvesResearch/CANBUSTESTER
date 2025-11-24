@@ -80,6 +80,336 @@ def _detect_can_interfaces() -> list[Dict[str, Any]]:
     return results
 
 
+class FaultInjectionManager:
+    """Manages fault injection testing for CAN messages."""
+
+    def __init__(
+        self,
+        dbc_manager: DBCManager,
+        can_manager: CANManager,
+    ) -> None:
+        self._dbc_manager = dbc_manager
+        self._can_manager = can_manager
+        self._tasks: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.Lock()
+        self._notifier: Optional[Callable[[str, str, Dict[str, Any]], None]] = None
+
+    def set_notifier(self, notifier: Callable[[str, str, Dict[str, Any]], None]) -> None:
+        self._notifier = notifier
+
+    def start(
+        self,
+        message_name: str,
+        fault_type: str,
+        interval_seconds: float,
+        count: int,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        if interval_seconds <= 0:
+            raise ValueError("Interval must be greater than zero.")
+        if count <= 0:
+            raise ValueError("Count must be greater than zero.")
+
+        with self._lock:
+            if message_name in self._tasks:
+                raise RuntimeError("Fault test already running for this message.")
+
+        try:
+            message = self._dbc_manager.get_message_by_name(message_name)
+        except KeyError as exc:
+            raise RuntimeError("Message not found.") from exc
+
+        status = self._can_manager.get_status()
+        if not status.get("configured"):
+            raise RuntimeError("Configure CAN interface first.")
+
+        stop_event = threading.Event()
+        started_at = time.time()
+
+        info: Dict[str, Any] = {
+            "messageName": message_name,
+            "faultType": fault_type,
+            "intervalSeconds": interval_seconds,
+            "totalCount": count,
+            "sentCount": 0,
+            "startedAt": started_at,
+        }
+
+        thread = threading.Thread(
+            target=self._run_fault_test,
+            args=(message_name, message, fault_type, interval_seconds, count, stop_event, kwargs),
+            name=f"fault-injection-{message_name}",
+            daemon=True,
+        )
+
+        with self._lock:
+            self._tasks[message_name] = {
+                "thread": thread,
+                "stop": stop_event,
+                "info": info,
+            }
+
+        thread.start()
+        return info.copy()
+
+    def stop(self, message_name: str) -> Dict[str, Any]:
+        with self._lock:
+            task = self._tasks.get(message_name)
+            if not task:
+                raise RuntimeError("No active fault test for this message.")
+            stop_event: threading.Event = task["stop"]
+            info = task["info"].copy()
+
+        stop_event.set()
+        task["thread"].join(timeout=1.0)
+
+        with self._lock:
+            self._tasks.pop(message_name, None)
+
+        return info
+
+    def get_status(self, message_name: Optional[str] = None) -> List[Dict[str, Any]]:
+        with self._lock:
+            if message_name:
+                task = self._tasks.get(message_name)
+                return [task["info"].copy()] if task else []
+            return [task["info"].copy() for task in self._tasks.values()]
+
+    def stop_all(self) -> None:
+        for message_name in list(self._tasks.keys()):
+            try:
+                self.stop(message_name)
+            except RuntimeError:
+                continue
+
+    def _run_fault_test(
+        self,
+        message_name: str,
+        message: Any,
+        fault_type: str,
+        interval_seconds: float,
+        count: int,
+        stop_event: threading.Event,
+        kwargs: Dict[str, Any],
+    ) -> None:
+        import random
+
+        try:
+            for i in range(count):
+                if stop_event.is_set():
+                    break
+
+                try:
+                    if fault_type == "bit-flip":
+                        encoded = self._inject_bit_flip(message_name, message, kwargs.get("bit_flip_count", 1))
+                    elif fault_type == "dlc-mismatch":
+                        encoded = self._inject_dlc_mismatch(message_name, message, kwargs.get("dlc_value", 8))
+                    elif fault_type == "out-of-range":
+                        encoded = self._inject_out_of_range(
+                            message_name,
+                            message,
+                            kwargs.get("target_signal"),
+                            kwargs.get("range_multiplier", 2.0),
+                        )
+                    elif fault_type == "random-data":
+                        encoded = self._inject_random_data(message)
+                    elif fault_type == "zero-data":
+                        encoded = self._inject_zero_data(message)
+                    elif fault_type == "max-data":
+                        encoded = self._inject_max_data(message)
+                    else:
+                        raise ValueError(f"Unknown fault type: {fault_type}")
+
+                    self._send(message_name, encoded, fault_type=fault_type)
+                    self._update_progress(message_name, i + 1)
+                    self._notify_progress(message_name, i + 1, count)
+
+                except Exception as exc:
+                    logger.exception("Fault injection error: %s", exc)
+
+                if stop_event.wait(interval_seconds):
+                    break
+        finally:
+            # Clean up task when completed
+            with self._lock:
+                self._tasks.pop(message_name, None)
+            self._notify_completed(message_name)
+
+    def _inject_bit_flip(self, message_name: str, message: Any, bit_count: int) -> Dict[str, Any]:
+        import random
+
+        # Get normal encoded message
+        signal_values: Dict[str, Any] = {}
+        for signal in message.signals:
+            signal_values[signal.name] = getattr(signal, "initial", 0) if signal.initial is not None else 0
+
+        encoded = self._dbc_manager.encode(message_name, signal_values)
+        data = bytearray(encoded["data"])
+
+        # Flip random bits
+        total_bits = len(data) * 8
+        bits_to_flip = min(bit_count, total_bits)
+        bit_positions = random.sample(range(total_bits), bits_to_flip)
+
+        for bit_pos in bit_positions:
+            byte_index = bit_pos // 8
+            bit_offset = bit_pos % 8
+            data[byte_index] ^= (1 << bit_offset)
+
+        encoded["data"] = bytes(data)
+        encoded["faultType"] = "bit-flip"
+        encoded["faultInfo"] = f"{bits_to_flip} bit(s) flipped"
+        return encoded
+
+    def _inject_dlc_mismatch(self, message_name: str, message: Any, dlc_value: int) -> Dict[str, Any]:
+        # Get normal encoded message
+        signal_values: Dict[str, Any] = {}
+        for signal in message.signals:
+            signal_values[signal.name] = getattr(signal, "initial", 0) if signal.initial is not None else 0
+
+        encoded = self._dbc_manager.encode(message_name, signal_values)
+        
+        # Change DLC to mismatch actual data length
+        actual_len = len(encoded["data"])
+        encoded["dlc"] = dlc_value
+        
+        # Pad or truncate data if needed
+        if dlc_value > actual_len:
+            encoded["data"] = encoded["data"] + bytes([0] * (dlc_value - actual_len))
+        elif dlc_value < actual_len:
+            encoded["data"] = encoded["data"][:dlc_value]
+        
+        encoded["faultType"] = "dlc-mismatch"
+        encoded["faultInfo"] = f"DLC={dlc_value}, Data length={actual_len}"
+        return encoded
+
+    def _inject_out_of_range(
+        self,
+        message_name: str,
+        message: Any,
+        target_signal: Optional[str],
+        multiplier: float,
+    ) -> Dict[str, Any]:
+        if not target_signal:
+            raise ValueError("Target signal required for out-of-range fault.")
+
+        signal_values: Dict[str, Any] = {}
+        fault_info = ""
+        
+        for signal in message.signals:
+            if signal.name == target_signal:
+                # Set value beyond max limit
+                if signal.maximum is not None:
+                    value = signal.maximum * multiplier
+                    fault_info = f"{signal.name}={value} (max={signal.maximum})"
+                elif signal.minimum is not None:
+                    value = signal.minimum * multiplier
+                    fault_info = f"{signal.name}={value} (min={signal.minimum})"
+                else:
+                    value = 999999  # Arbitrary large value
+                    fault_info = f"{signal.name}={value} (no limits defined)"
+                signal_values[signal.name] = value
+            else:
+                signal_values[signal.name] = getattr(signal, "initial", 0) if signal.initial is not None else 0
+
+        try:
+            encoded = self._dbc_manager.encode(message_name, signal_values)
+        except Exception as exc:
+            # If encoding fails due to out of range, use raw data approach
+            encoded = {
+                "arbitration_id": message.frame_id,
+                "data": bytes([0xFF] * int(message.length or 8)),
+                "is_extended": message.is_extended_frame,
+                "dlc": int(message.length or 8),
+            }
+            fault_info += f" (encoding failed: {exc})"
+
+        encoded["faultType"] = "out-of-range"
+        encoded["faultInfo"] = fault_info
+        return encoded
+
+    def _inject_random_data(self, message: Any) -> Dict[str, Any]:
+        import random
+        
+        byte_length = int(message.length or 8)
+        data = bytes([random.randint(0, 255) for _ in range(byte_length)])
+        
+        return {
+            "arbitration_id": message.frame_id,
+            "data": data,
+            "is_extended": message.is_extended_frame,
+            "dlc": byte_length,
+            "faultType": "random-data",
+            "faultInfo": "All bytes randomized",
+        }
+
+    def _inject_zero_data(self, message: Any) -> Dict[str, Any]:
+        byte_length = int(message.length or 8)
+        data = bytes([0x00] * byte_length)
+        
+        return {
+            "arbitration_id": message.frame_id,
+            "data": data,
+            "is_extended": message.is_extended_frame,
+            "dlc": byte_length,
+            "faultType": "zero-data",
+            "faultInfo": "All bytes set to 0x00",
+        }
+
+    def _inject_max_data(self, message: Any) -> Dict[str, Any]:
+        byte_length = int(message.length or 8)
+        data = bytes([0xFF] * byte_length)
+        
+        return {
+            "arbitration_id": message.frame_id,
+            "data": data,
+            "is_extended": message.is_extended_frame,
+            "dlc": byte_length,
+            "faultType": "max-data",
+            "faultInfo": "All bytes set to 0xFF",
+        }
+
+    def _send(self, message_name: str, encoded: Dict[str, Any], fault_type: str) -> None:
+        message = _build_can_message(encoded)
+        self._can_manager.send(message)
+        if self._notifier:
+            payload = dict(encoded)
+            payload["faultType"] = fault_type
+            if "faultInfo" in encoded:
+                payload["faultInfo"] = encoded["faultInfo"]
+            self._notifier(message_name, "tx", payload)
+
+    def _update_progress(self, message_name: str, sent_count: int) -> None:
+        with self._lock:
+            task = self._tasks.get(message_name)
+            if task:
+                task["info"]["sentCount"] = sent_count
+
+    def _notify_progress(self, message_name: str, sent_count: int, total_count: int) -> None:
+        if self._notifier:
+            self._notifier(
+                message_name,
+                "fault",
+                {
+                    "status": "progress",
+                    "sentCount": sent_count,
+                    "totalCount": total_count,
+                    "messageName": message_name,
+                },
+            )
+
+    def _notify_completed(self, message_name: str) -> None:
+        if self._notifier:
+            self._notifier(
+                message_name,
+                "fault",
+                {
+                    "status": "completed",
+                    "messageName": message_name,
+                },
+            )
+
+
 class SignalChaserManager:
     """Manages automated signal and error-code emission workflows."""
 
@@ -655,6 +985,7 @@ recording_root.mkdir(parents=True, exist_ok=True)
 
 recording_manager = RecordingManager(recording_root)
 signal_chaser = SignalChaserManager(dbc_manager, can_manager)
+fault_injection = FaultInjectionManager(dbc_manager, can_manager)
 
 
 class ConfigureInterfaceRequest(BaseModel):
@@ -699,6 +1030,21 @@ class SignalChaserStartRequest(BaseModel):
 
 
 class SignalChaserStopRequest(BaseModel):
+    message_name: str = Field(alias="messageName")
+
+
+class FaultInjectionStartRequest(BaseModel):
+    message_name: str = Field(alias="messageName")
+    fault_type: Literal["bit-flip", "dlc-mismatch", "out-of-range", "random-data", "zero-data", "max-data"] = Field(alias="faultType")
+    interval_seconds: float = Field(alias="intervalSeconds", gt=0)
+    count: int = Field(gt=0)
+    bit_flip_count: Optional[int] = Field(default=1, alias="bitFlipCount", ge=1, le=64)
+    dlc_value: Optional[int] = Field(default=None, alias="dlcValue", ge=0, le=8)
+    target_signal: Optional[str] = Field(default=None, alias="targetSignal")
+    range_multiplier: Optional[float] = Field(default=2.0, alias="rangeMultiplier", ge=1.1)
+
+
+class FaultInjectionStopRequest(BaseModel):
     message_name: str = Field(alias="messageName")
 
 
@@ -784,6 +1130,28 @@ def _handle_tx_event(
 signal_chaser.set_notifier(_handle_tx_event)
 
 
+def _handle_fault_event(message_name: str, event_type: str, data: Dict[str, Any]) -> None:
+    if event_type == "tx":
+        timestamp = time.time()
+        payload = {
+            "type": "tx",
+            "message": message_name,
+            "id": data["arbitration_id"],
+            "dlc": data["dlc"],
+            "data": list(data["data"]),
+            "timestamp": timestamp,
+            "faultType": data.get("faultType"),
+            "faultInfo": data.get("faultInfo"),
+        }
+        broadcaster.send_threadsafe(payload)
+        recording_manager.append_event(payload)
+    elif event_type == "fault":
+        broadcaster.send_threadsafe({"type": "fault", **data})
+
+
+fault_injection.set_notifier(_handle_fault_event)
+
+
 def _on_can_message(message: can.Message) -> None:
     payload: Dict[str, Any] = {
         "type": "rx",
@@ -817,6 +1185,7 @@ async def on_startup() -> None:
 async def on_shutdown() -> None:
     can_manager.shutdown()
     signal_chaser.stop_all()
+    fault_injection.stop_all()
 
 
 @app.get("/")
@@ -1204,6 +1573,50 @@ async def stop_signal_chaser(request: SignalChaserStopRequest) -> Dict[str, Any]
         return {"status": "stopped", "task": task}
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/messages/fault/start")
+async def start_fault_injection(request: FaultInjectionStartRequest) -> Dict[str, Any]:
+    if not dbc_manager.is_loaded():
+        raise HTTPException(status_code=400, detail="Load a DBC file first.")
+    
+    try:
+        kwargs = {}
+        if request.fault_type == "bit-flip":
+            kwargs["bit_flip_count"] = request.bit_flip_count or 1
+        elif request.fault_type == "dlc-mismatch":
+            kwargs["dlc_value"] = request.dlc_value if request.dlc_value is not None else 8
+        elif request.fault_type == "out-of-range":
+            if not request.target_signal:
+                raise HTTPException(status_code=400, detail="Target signal required for out-of-range fault.")
+            kwargs["target_signal"] = request.target_signal
+            kwargs["range_multiplier"] = request.range_multiplier or 2.0
+        
+        task = fault_injection.start(
+            request.message_name,
+            request.fault_type,
+            request.interval_seconds,
+            request.count,
+            **kwargs,
+        )
+        return {"status": "running", "task": task}
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/messages/fault/stop")
+async def stop_fault_injection(request: FaultInjectionStopRequest) -> Dict[str, Any]:
+    try:
+        task = fault_injection.stop(request.message_name)
+        return {"status": "stopped", "task": task}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/messages/fault/status")
+async def get_fault_injection_status(message_name: Optional[str] = Query(default=None, alias="messageName")) -> Dict[str, Any]:
+    tasks = fault_injection.get_status(message_name)
+    return {"tasks": tasks}
 
 
 @app.get("/api/logs")

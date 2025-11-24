@@ -16,6 +16,9 @@ const state = {
     codeSource: "excel",
     codeUpload: null,
     codeDecimalUpload: null,
+    faultTest: null,
+    faultType: "bit-flip",
+    faultMessage: null,
 };
 
 const interfaceForm = document.getElementById("interface-form");
@@ -67,6 +70,22 @@ const decimalSignalSelectorContainer = document.getElementById("decimal-signal-s
 const codeManualPanel = document.getElementById("code-source-manual");
 const codeRangeStartInput = document.getElementById("code-range-start");
 const codeRangeEndInput = document.getElementById("code-range-end");
+
+// Fault injection elements
+const faultMessageList = document.getElementById("fault-message-list");
+const faultTypeRadios = Array.from(document.querySelectorAll('input[name="fault-type"]'));
+const faultBitFlipConfig = document.getElementById("fault-bit-flip-config");
+const faultDlcConfig = document.getElementById("fault-dlc-config");
+const faultRangeConfig = document.getElementById("fault-range-config");
+const bitFlipCountInput = document.getElementById("bit-flip-count");
+const dlcValueInput = document.getElementById("dlc-value");
+const faultTargetSignal = document.getElementById("fault-target-signal");
+const rangeMultiplierInput = document.getElementById("range-multiplier");
+const faultIntervalInput = document.getElementById("fault-interval");
+const faultCountInput = document.getElementById("fault-count");
+const faultStartButton = document.getElementById("fault-start");
+const faultStopButton = document.getElementById("fault-stop");
+const faultStatus = document.getElementById("fault-status");
 
 // Language buttons
 const langTrButton = document.getElementById("lang-tr");
@@ -426,6 +445,124 @@ setCodeSourceValue(state.codeSource || "excel", { skipRadios: true });
 renderCodeUploadState();
 renderCodeDecimalUploadState();
 
+function setFaultTypeValue(faultType, options = {}) {
+    state.faultType = faultType;
+    if (!options.skipRadios && faultTypeRadios.length) {
+        faultTypeRadios.forEach((radio) => {
+            radio.checked = radio.value === faultType;
+        });
+    }
+    
+    // Hide all config panels
+    if (faultBitFlipConfig) faultBitFlipConfig.classList.add("hidden");
+    if (faultDlcConfig) faultDlcConfig.classList.add("hidden");
+    if (faultRangeConfig) faultRangeConfig.classList.add("hidden");
+    
+    // Show relevant config panel
+    if (faultType === "bit-flip" && faultBitFlipConfig) {
+        faultBitFlipConfig.classList.remove("hidden");
+    } else if (faultType === "dlc-mismatch" && faultDlcConfig) {
+        faultDlcConfig.classList.remove("hidden");
+    } else if (faultType === "out-of-range" && faultRangeConfig) {
+        faultRangeConfig.classList.remove("hidden");
+        updateFaultTargetSignalSelector();
+    }
+}
+
+function updateFaultTargetSignalSelector() {
+    if (!faultTargetSignal) return;
+    
+    if (!state.faultMessage) {
+        faultTargetSignal.disabled = true;
+        faultTargetSignal.innerHTML = `<option>${t('select_message_first')}</option>`;
+        return;
+    }
+    
+    faultTargetSignal.disabled = false;
+    faultTargetSignal.innerHTML = "";
+    
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = t('select_signal');
+    faultTargetSignal.append(placeholder);
+    
+    for (const signal of state.faultMessage.signals) {
+        const option = document.createElement("option");
+        option.value = signal.name;
+        option.textContent = signal.name;
+        faultTargetSignal.append(option);
+    }
+}
+
+function populateFaultMessageSelect(messages) {
+    if (!faultMessageList) return;
+    
+    faultMessageList.innerHTML = "";
+    if (!messages.length) {
+        const option = document.createElement("option");
+        option.textContent = t('no_messages_found');
+        faultMessageList.append(option);
+        faultMessageList.disabled = true;
+        return;
+    }
+    faultMessageList.disabled = false;
+    const placeholder = document.createElement("option");
+    placeholder.textContent = t('select_message');
+    placeholder.value = "";
+    faultMessageList.append(placeholder);
+
+    for (const message of messages) {
+        const option = document.createElement("option");
+        option.value = message.name;
+        option.textContent = `${message.name} (0x${message.frame_id.toString(16).toUpperCase()})`;
+        faultMessageList.append(option);
+    }
+}
+
+function setFaultTestState(faultInfo) {
+    state.faultTest = faultInfo;
+    if (!faultStartButton || !faultStopButton || !faultStatus) return;
+    
+    const hasMessage = Boolean(state.faultMessage);
+    const isActive = Boolean(faultInfo);
+    
+    faultStartButton.disabled = !hasMessage || isActive;
+    faultStopButton.disabled = !isActive;
+    
+    if (faultIntervalInput) faultIntervalInput.disabled = isActive;
+    if (faultCountInput) faultCountInput.disabled = isActive;
+    if (faultMessageList) faultMessageList.disabled = isActive;
+    if (faultTypeRadios.length) {
+        faultTypeRadios.forEach((radio) => {
+            radio.disabled = isActive;
+        });
+    }
+    if (bitFlipCountInput) bitFlipCountInput.disabled = isActive;
+    if (dlcValueInput) dlcValueInput.disabled = isActive;
+    if (faultTargetSignal) faultTargetSignal.disabled = isActive || !state.faultMessage;
+    if (rangeMultiplierInput) rangeMultiplierInput.disabled = isActive;
+    
+    if (!hasMessage) {
+        faultStatus.textContent = t('select_message_first');
+        return;
+    }
+    
+    if (isActive) {
+        const sent = faultInfo.sentCount || 0;
+        const total = faultInfo.totalCount || 0;
+        const interval = faultInfo.intervalSeconds || 0;
+        const intervalText = interval > 0 && !Number.isNaN(interval)
+            ? (Number.isInteger(interval) ? interval.toString() : interval.toFixed(2))
+            : "?";
+        const unit = getCurrentLanguage() === 'tr' ? 'sn' : 'sec';
+        faultStatus.textContent = `${t('fault_test_running')} (${t('every')} ${intervalText} ${unit}). ${t('sent_count')}: ${sent}${t('of')}${total}`;
+    } else {
+        faultStatus.textContent = t('fault_test_ready');
+    }
+}
+
+setFaultTypeValue(state.faultType || "bit-flip", { skipRadios: true });
+
 function setManualMode(enabled) {
     state.manualMode = enabled;
     if (enabled) {
@@ -738,6 +875,9 @@ function populateMessageSelect(messages) {
         option.textContent = `${message.name} (0x${message.frame_id.toString(16).toUpperCase()})`;
         messageSelector.append(option);
     }
+    
+    // Also populate fault message selector
+    populateFaultMessageSelect(messages);
 }
 
 function renderSignals(message) {
@@ -858,6 +998,18 @@ function logEvent(entry) {
     renderMonitor();
 }
 
+function formatFaultType(faultType) {
+    const types = {
+        'bit-flip': t('fault_bit_flip'),
+        'dlc-mismatch': t('fault_dlc_mismatch'),
+        'out-of-range': t('fault_out_of_range'),
+        'random-data': t('fault_random_data'),
+        'zero-data': t('fault_zero_data'),
+        'max-data': t('fault_max_data'),
+    };
+    return types[faultType] || faultType;
+}
+
 function renderMonitor() {
     monitorLog.innerHTML = "";
     for (const entry of state.monitorEntries) {
@@ -891,6 +1043,21 @@ function renderMonitor() {
             const descriptionLine = document.createElement("span");
             descriptionLine.textContent = `${t('code_description_label')}: ${entry.description}`;
             container.append(descriptionLine);
+        }
+        
+        if (entry.faultType) {
+            const faultLine = document.createElement("span");
+            faultLine.style.color = "#ef4444";
+            faultLine.style.fontWeight = "600";
+            faultLine.textContent = `⚠️ FAULT: ${formatFaultType(entry.faultType)}`;
+            container.append(faultLine);
+        }
+        
+        if (entry.faultInfo) {
+            const faultInfoLine = document.createElement("span");
+            faultInfoLine.style.color = "#f97316";
+            faultInfoLine.textContent = `└─ ${entry.faultInfo}`;
+            container.append(faultInfoLine);
         }
 
         if (entry.decoded) {
@@ -1087,6 +1254,31 @@ if (decimalSignalSelector) {
     });
 }
 
+if (faultMessageList) {
+    faultMessageList.addEventListener("change", (event) => {
+        const selected = state.messages.find((msg) => msg.name === event.target.value);
+        state.faultMessage = selected || null;
+        if (selected && state.faultType === "out-of-range") {
+            updateFaultTargetSignalSelector();
+        }
+        setFaultTestState(state.faultTest);
+    });
+}
+
+if (faultTypeRadios.length) {
+    faultTypeRadios.forEach((radio) => {
+        radio.addEventListener("change", () => {
+            if (!radio.checked) return;
+            const isActive = Boolean(state.faultTest);
+            if (isActive) {
+                setFaultTypeValue(state.faultTest.faultType || "bit-flip");
+                return;
+            }
+            setFaultTypeValue(radio.value);
+        });
+    });
+}
+
 messageForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (!state.selectedMessage) {
@@ -1274,6 +1466,78 @@ if (chaserStopButton) {
     });
 }
 
+if (faultStartButton) {
+    faultStartButton.addEventListener("click", async () => {
+        if (!state.faultMessage) {
+            faultStatus.textContent = t('select_message_first');
+            return;
+        }
+        
+        const interval = Number(faultIntervalInput?.value || 0);
+        if (Number.isNaN(interval) || interval <= 0) {
+            faultStatus.textContent = t('interval_must_be_positive');
+            return;
+        }
+        
+        const count = Number(faultCountInput?.value || 0);
+        if (Number.isNaN(count) || count <= 0) {
+            faultStatus.textContent = t('fault_count') + ' ' + t('interval_must_be_positive');
+            return;
+        }
+        
+        const faultType = state.faultType || "bit-flip";
+        const payload = {
+            messageName: state.faultMessage.name,
+            faultType: faultType,
+            intervalSeconds: interval,
+            count: count,
+        };
+        
+        if (faultType === "bit-flip") {
+            const bitCount = Number(bitFlipCountInput?.value || 1);
+            payload.bitFlipCount = bitCount;
+        } else if (faultType === "dlc-mismatch") {
+            const dlc = Number(dlcValueInput?.value || 8);
+            payload.dlcValue = dlc;
+        } else if (faultType === "out-of-range") {
+            const targetSignal = faultTargetSignal?.value;
+            if (!targetSignal) {
+                faultStatus.textContent = t('select_signal_first');
+                return;
+            }
+            const multiplier = Number(rangeMultiplierInput?.value || 2);
+            payload.targetSignal = targetSignal;
+            payload.rangeMultiplier = multiplier;
+        }
+        
+        try {
+            const response = await api.post("/api/messages/fault/start", payload);
+            setFaultTestState(response.task || response);
+            faultStatus.textContent = t('fault_test_started');
+        } catch (error) {
+            faultStatus.textContent = `${t('error')} ${error.message || error}`;
+        }
+    });
+}
+
+if (faultStopButton) {
+    faultStopButton.addEventListener("click", async () => {
+        if (!state.faultMessage) {
+            faultStatus.textContent = t('select_message_first');
+            return;
+        }
+        try {
+            await api.post("/api/messages/fault/stop", {
+                messageName: state.faultMessage.name,
+            });
+            setFaultTestState(null);
+            faultStatus.textContent = t('fault_test_stopped');
+        } catch (error) {
+            faultStatus.textContent = `${t('error')} ${error.message || error}`;
+        }
+    });
+}
+
 stopButton.addEventListener("click", async () => {
     if (!state.currentTaskKey) return;
     try {
@@ -1338,6 +1602,18 @@ function handleSocketEvent(event) {
                     recordStatus.textContent = `${t('recording_completed')} ${event.record.name}`;
                 }
                 refreshRecordings();
+            }
+            break;
+        }
+        case "fault": {
+            if (event.status === "progress" && state.faultTest && state.faultMessage && event.messageName === state.faultMessage.name) {
+                state.faultTest.sentCount = event.sentCount;
+                setFaultTestState(state.faultTest);
+            } else if (event.status === "completed" && state.faultTest && state.faultMessage && event.messageName === state.faultMessage.name) {
+                setFaultTestState(null);
+                if (faultStatus) {
+                    faultStatus.textContent = t('fault_test_completed');
+                }
             }
             break;
         }

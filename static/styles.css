@@ -368,6 +368,101 @@ button:not(:disabled):focus {
     padding: 0.75rem 0.85rem;
 }
 
+.fault-injection-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.fault-config {
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+    background: rgba(15, 23, 23, 0.08);
+    border-radius: 12px;
+    padding: 1rem;
+}
+
+.fault-types {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.fault-type-options {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 0.6rem;
+}
+
+.fault-type-options label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.9rem;
+    cursor: pointer;
+    user-select: none;
+    padding: 0.5rem;
+    background: rgba(17, 24, 23, 0.12);
+    border-radius: 8px;
+    border: 1px solid rgba(148, 163, 184, 0.2);
+    transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.fault-type-options label:hover {
+    border-color: rgba(252, 165, 165, 0.5);
+}
+
+.fault-type-options input[type="radio"]:checked + span {
+    font-weight: 600;
+}
+
+.fault-type-options label:has(input[type="radio"]:checked) {
+    border-color: var(--primary);
+    background: rgba(220, 38, 38, 0.15);
+}
+
+.fault-config-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0.75rem;
+    border-radius: 10px;
+    background: rgba(17, 24, 23, 0.08);
+    border: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.fault-buttons {
+    display: flex;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+}
+
+.fault-buttons button {
+    flex: 1;
+    min-width: 160px;
+}
+
+:root[data-theme="light"] .fault-config {
+    background: rgba(248, 250, 252, 0.95);
+    border: 1px solid rgba(203, 213, 225, 0.6);
+}
+
+:root[data-theme="light"] .fault-type-options label {
+    background: rgba(255, 255, 255, 0.9);
+    border-color: rgba(148, 163, 184, 0.35);
+}
+
+:root[data-theme="light"] .fault-type-options label:has(input[type="radio"]:checked) {
+    border-color: var(--primary);
+    background: rgba(220, 38, 38, 0.1);
+}
+
+:root[data-theme="light"] .fault-config-panel {
+    background: rgba(248, 250, 252, 0.9);
+    border-color: rgba(203, 213, 225, 0.6);
+}
+
 .chaser-mode,
 .code-source {
     display: flex;
